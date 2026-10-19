@@ -1,0 +1,17 @@
+{
+  "id": "cyme9-si-candidate-v1",
+  "authority": "analyst-assumption",
+  "description": "Convenciones candidatas para la base BD_Centro0926; requieren contraste con CYME. No equivalen a los enums COM.",
+  "length_unit": "m",
+  "series_impedance_unit": "ohm/km",
+  "shunt_admittance_unit": "uS/km",
+  "source_voltage_unit": "kV_LN",
+  "load_value_types": {"0": "kw_kvar"},
+  "multiphase_load_value_scope": "unverified",
+  "evidence_notes": [
+    "memory.md del MCP registra Length en metros y OperatingVoltageA/B/C en kV fase-neutro, observados mediante API.",
+    "cymUnit.ini enumera ohm/km y uS/km, pero no vincula por sí mismo esas unidades a columnas Access.",
+    "Todas las cargas importadas usan LoadValueType=0; kW/kvar es una interpretación candidata pendiente de contraste.",
+    "No se reparte automáticamente una fila ABC entre fases ni se presupone si sus valores son totales o por fase."
+  ]
+}

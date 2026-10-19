@@ -1,0 +1,32 @@
+{
+  "format": "nandu-electrical-network-v1",
+  "description": "Tres ramas delta de 1000 W + 500 var, compensadas por tres capacitores de 300 var nominales por rama.",
+  "frequency_hz": 50,
+  "source": {
+    "bus": "fuente", "voltage_ln_v": 230, "angle_deg": 0,
+    "r1_ohm": 0.01, "x1_ohm": 0, "r0_ohm": 0.01, "x0_ohm": 0
+  },
+  "buses": [
+    {"id": "fuente", "phases": ["A", "B", "C"]},
+    {"id": "carga", "phases": ["A", "B", "C"]}
+  ],
+  "lines": [
+    {
+      "id": "linea", "from_bus": "fuente", "to_bus": "carga", "phases": ["A", "B", "C"],
+      "r_ohm": [[0.2, 0, 0], [0, 0.2, 0], [0, 0, 0.2]],
+      "x_ohm": [[0, 0, 0], [0, 0, 0], [0, 0, 0]],
+      "c_nf": [[0, 0, 0], [0, 0, 0], [0, 0, 0]], "enabled": true
+    }
+  ],
+  "loads": [
+    {"id": "AB", "bus": "carga", "phases": ["A", "B"], "connection": "delta", "model": "constant_power", "p_w": 1000, "q_var": 500},
+    {"id": "BC", "bus": "carga", "phases": ["B", "C"], "connection": "delta", "model": "constant_power", "p_w": 1000, "q_var": 500},
+    {"id": "CA", "bus": "carga", "phases": ["C", "A"], "connection": "delta", "model": "constant_power", "p_w": 1000, "q_var": 500}
+  ],
+  "capacitors": [
+    {"id": "cap-AB", "bus": "carga", "phases": ["A", "B"], "connection": "delta", "rated_voltage_v": 398.37168574084177, "rated_q_var": 300, "enabled": true},
+    {"id": "cap-BC", "bus": "carga", "phases": ["B", "C"], "connection": "delta", "rated_voltage_v": 398.37168574084177, "rated_q_var": 300, "enabled": true},
+    {"id": "cap-CA", "bus": "carga", "phases": ["C", "A"], "connection": "delta", "rated_voltage_v": 398.37168574084177, "rated_q_var": 300, "enabled": true}
+  ],
+  "solver": {"max_iterations": 100, "tolerance": 1e-10}
+}

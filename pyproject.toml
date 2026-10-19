@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nandu-grid"
+version = "0.9.0"
+description = "Ñandu: modelado y análisis de redes eléctricas de distribución"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+access = ["pyodbc==5.1.0"]
+solver = ["dss-python==0.15.7"]
+engine = ["numpy==2.4.6", "scipy==1.16.3"]
+
+[project.scripts]
+nandu = "nandu.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["nandu*"]
+
+[tool.setuptools.package-data]
+nandu = ["ui/static/*"]

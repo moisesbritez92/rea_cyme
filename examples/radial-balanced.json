@@ -1,0 +1,29 @@
+{
+  "format": "nandu-electrical-network-v1",
+  "description": "Caso analítico: fuente 230 V LN, R fuente=0.01 ohm, R línea=0.2 ohm por fase, 1 kW por fase.",
+  "frequency_hz": 50,
+  "source": {
+    "bus": "fuente", "voltage_ln_v": 230, "angle_deg": 0,
+    "r1_ohm": 0.01, "x1_ohm": 0,
+    "r0_ohm": 0.01, "x0_ohm": 0
+  },
+  "buses": [
+    {"id": "fuente", "phases": ["A", "B", "C"]},
+    {"id": "carga", "phases": ["A", "B", "C"]}
+  ],
+  "lines": [
+    {
+      "id": "linea-1", "from_bus": "fuente", "to_bus": "carga", "phases": ["A", "B", "C"],
+      "r_ohm": [[0.2, 0, 0], [0, 0.2, 0], [0, 0, 0.2]],
+      "x_ohm": [[0, 0, 0], [0, 0, 0], [0, 0, 0]],
+      "c_nf": [[0, 0, 0], [0, 0, 0], [0, 0, 0]],
+      "enabled": true
+    }
+  ],
+  "loads": [
+    {"id": "carga-A", "bus": "carga", "phase": "A", "p_w": 1000, "q_var": 0, "connection": "wye_grounded", "model": "constant_power"},
+    {"id": "carga-B", "bus": "carga", "phase": "B", "p_w": 1000, "q_var": 0, "connection": "wye_grounded", "model": "constant_power"},
+    {"id": "carga-C", "bus": "carga", "phase": "C", "p_w": 1000, "q_var": 0, "connection": "wye_grounded", "model": "constant_power"}
+  ],
+  "solver": {"max_iterations": 100, "tolerance": 1e-10}
+}
