@@ -1,8 +1,9 @@
-"""Servidor local de la interfaz. Solo escucha en 127.0.0.1 y lee archivos .nandu.sqlite."""
+"""Servidor local de la interfaz. Solo escucha en loopback (127.0.0.1 y ::1) y lee archivos .nandu.sqlite."""
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 import re
+import socket
 import threading
 import traceback
 from urllib.parse import parse_qs, urlparse
@@ -122,10 +123,22 @@ def handler(state):
     return Handler
 
 
+class LoopbackV6Server(ThreadingHTTPServer):
+    address_family = socket.AF_INET6
+
+
 def serve(data_dir, initial=None, port=8765, open_browser=True):
     state = State(data_dir, initial)
     server = ThreadingHTTPServer(('127.0.0.1', port), handler(state))
-    url = f'http://127.0.0.1:{server.server_address[1]}/'
+    port = server.server_address[1]
+    # «localhost» suele resolver primero a ::1 en Windows (p. ej. el reenvío de puertos de VS Code):
+    # también se escucha en el loopback IPv6, nunca en otras interfaces.
+    try:
+        v6 = LoopbackV6Server(('::1', port), handler(state))
+        threading.Thread(target=v6.serve_forever, daemon=True).start()
+    except OSError:
+        v6 = None
+    url = f'http://127.0.0.1:{port}/'
     print(f'Ñandu UI en {url} (Ctrl+C para detener)')
     if open_browser:
         threading.Timer(0.5, webbrowser.open, (url,)).start()
@@ -135,3 +148,6 @@ def serve(data_dir, initial=None, port=8765, open_browser=True):
         pass
     finally:
         server.server_close()
+        if v6:
+            v6.shutdown()
+            v6.server_close()
