@@ -84,6 +84,13 @@ class ModelTests(unittest.TestCase):
         self.assertFalse(model['loads'])
         self.assertEqual(model['issues'][0]['code'], 'customer_load_excluded')
 
+    def test_cyme_equivalent_exclusion_is_not_incomplete_coverage(self):
+        model = cyme_model.build(tables(connection=0, load_phase=7, section_phase=2))
+        self.assertTrue(model['issues'][0]['cyme_equivalent'])
+        cov = cyme_model.coverage(model)
+        self.assertEqual((cov['status'], cov['excluded_load_kw']), ('cyme_equivalent_exclusions', 90.0))
+        self.assertEqual(cyme_model.coverage(cyme_model.build(tables()))['status'], 'complete')
+
     def test_source_phasors_and_conventions(self):
         model = cyme_model.build(tables())
         src = model['sources'][0]
@@ -92,6 +99,74 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(model['conventions']['abc_load_split']['authority'], 'verified')
         for entry in model['conventions'].values():
             self.assertTrue(entry['evidence'])
+
+
+def rename(t, suffix):
+    """Copia de las filas de red con todos los identificadores locales sufijados."""
+    out = {}
+    for name, rows in t.items():
+        out[name] = []
+        for row in rows:
+            if 'NetworkId' not in row:
+                continue
+            row = dict(row)
+            for field in ('NetworkId', 'SectionId', 'FromNodeId', 'ToNodeId', 'NodeId', 'DeviceNumber',
+                          'CustomerNumber', 'NormalFeedingNodeId'):
+                if row.get(field) is not None:
+                    row[field] += suffix
+            out[name].append(row)
+    out['CYMEQUIVALENTSOURCE'] = [{**r, 'NodeId': r['NodeId'] + suffix} for r in t['CYMEQUIVALENTSOURCE']]
+    return out
+
+
+def merged(*parts):
+    out = {}
+    for part in parts:
+        for name, rows in part.items():
+            out.setdefault(name, []).extend(rows)
+    return out
+
+
+class ExclusionAtomicityTests(unittest.TestCase):
+    """Una exclusión no deja nada incorporado a medias (revisión técnica 0.9.0, H2)."""
+
+    def test_late_shunt_failure_removes_the_whole_section(self):
+        t = tables()
+        t['CYMSECTIONDEVICE'].append({'NetworkId': 'N', 'SectionId': 's2', 'DeviceNumber': 'BAD',
+                                      'DeviceType': 17, 'Location': 2})
+        t['CYMSHUNTCAPACITOR'] = [{'NetworkId': 'N', 'DeviceNumber': 'BAD', 'Status': 0,
+                                   'CapacitorControlType': 0, 'ConnectionConfiguration': 999}]
+        model = cyme_model.build(t)
+        self.assertEqual(model['issues'][0]['code'], 'section_excluded')
+        self.assertFalse([l for l in model['lines'] if l['section_id'] == 's2'])
+        self.assertFalse(model['loads'])
+        self.assertFalse([b for b in model['buses'] if b == 'n2' or b.startswith('s2#')])
+        self.assertEqual([s['id'] for s in model['sections']], ['s1'])
+
+    def test_failed_delta_branch_drops_the_whole_customer_row(self):
+        model = cyme_model.build(tables(connection=2, load_phase=4, section_phase=4))
+        self.assertEqual(model['loads'], [])
+        self.assertEqual(model['issues'][0]['code'], 'customer_load_excluded')
+        self.assertEqual(cyme_model.coverage(model)['excluded_load_kw'], 90.0)
+
+
+class NetworkIdentityTests(unittest.TestCase):
+    """Identificadores repetidos entre redes (revisión técnica 0.9.0, H3)."""
+
+    def test_repeated_local_ids_are_excluded_not_merged(self):
+        t = tables()
+        model = cyme_model.build(merged(t, {k: [dict(r, NetworkId='N2') for r in rows if 'NetworkId' in r]
+                                            for k, rows in t.items()}))
+        self.assertEqual(model['buses'], {})
+        codes = {i['code'] for i in model['issues']}
+        self.assertEqual(codes, {'source_excluded', 'section_excluded', 'customer_load_excluded'})
+        self.assertEqual(cyme_model.coverage(model)['status'], 'incomplete')
+
+    def test_distinct_ids_keep_networks_separate(self):
+        model = cyme_model.build(merged(tables(), rename(tables(), '_2')))
+        self.assertEqual(model['issues'], [])
+        self.assertEqual(len(model['buses']), 2 * len(cyme_model.build(tables())['buses']))
+        self.assertEqual({b['network_id'] for b in model['buses'].values()}, {'N', 'N_2'})
 
 
 if __name__ == '__main__':

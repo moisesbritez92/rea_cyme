@@ -2,6 +2,7 @@
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
+import re
 import threading
 import traceback
 from urllib.parse import parse_qs, urlparse
@@ -10,6 +11,7 @@ import webbrowser
 from .service import Project
 
 STATIC = Path(__file__).with_name('static')
+NAME = re.compile(r'^[\w.\-]{1,120}\.nandu\.sqlite$')
 
 
 class State:
@@ -34,6 +36,24 @@ class State:
                 self.projects[path] = Project(path)
             return self.projects[path]
 
+    def save_as(self, project, name):
+        """Guardar la red editada como archivo nuevo de la carpeta de datos; el original queda intacto."""
+        name = str(name).strip()
+        if not name.endswith('.nandu.sqlite'):
+            name += '.nandu.sqlite'
+        if not NAME.match(name):
+            raise ValueError(f'Nombre de archivo no válido: {name}')
+        output = project.save_as(self.data_dir / name)
+        with self.lock:
+            # Las ediciones quedan en el archivo nuevo; el original vuelve a su estado en disco.
+            self.projects.pop(str(project.path), None)
+        return output
+
+
+def network(project):
+    return {'geometry': project.geometry(), 'explorer': project.explorer(), 'edits': project.edit_state(),
+            'provenance': project.info['provenance'], 'last': project.last}
+
 
 def handler(state):
     class Handler(SimpleHTTPRequestHandler):
@@ -42,6 +62,12 @@ def handler(state):
 
         def log_message(self, fmt, *args):
             pass
+
+        def end_headers(self):
+            # Los estáticos cambian durante el desarrollo; no mezclar HTML nuevo con JS/CSS cacheados.
+            if not self.path.startswith('/api/'):
+                self.send_header('Cache-Control', 'no-store')
+            super().end_headers()
 
         def _send(self, payload, status=200):
             body = json.dumps(payload, ensure_ascii=False, allow_nan=False, default=str).encode('utf-8')
@@ -64,14 +90,20 @@ def handler(state):
                     return self._send({'files': state.files(), 'initial': state.initial})
                 project = state.project(q['file'])
                 if route == 'network':
-                    return self._send({'geometry': project.geometry(), 'explorer': project.explorer(),
-                                       'provenance': project.info['provenance'], 'last': project.last})
+                    return self._send(network(project))
+                if route == 'catalog':
+                    return self._send(project.catalog())
+                if route in ('edit', 'undo') and method == 'POST':
+                    entry = project.edit(q['edit']) if route == 'edit' else project.undo()
+                    return self._send({**network(project), 'entry': entry})
+                if route == 'save-as' and method == 'POST':
+                    return self._send({'file': state.save_as(project, q['name'])})
                 if route == 'properties':
                     return self._send(project.properties(q['kind'], q['id']))
                 if route == 'run' and method == 'POST':
                     return self._send(project.run(q['analysis'], q.get('options')))
                 return self._send({'error': f'Ruta desconocida: {route}'}, 404)
-            except (KeyError, ValueError, PermissionError, FileNotFoundError) as exc:
+            except (KeyError, ValueError, PermissionError, FileNotFoundError, FileExistsError) as exc:
                 return self._send({'error': str(exc)}, 400)
             except Exception as exc:  # el detalle queda en la consola del servidor
                 traceback.print_exc()

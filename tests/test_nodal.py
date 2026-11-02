@@ -163,6 +163,51 @@ class SwitchTests(unittest.TestCase):
         res = nodal.results(sol)
         self.assertTrue(res['voltages']['T']['B'].get('deenergized'))
         self.assertNotIn('cola', [l['id'] for l in res['loads']])
+        self.assertEqual(sol['system']['skipped']['loads'], ['cola'])
+
+
+@unittest.skipUnless(ENGINE, 'requiere numpy y scipy')
+class StateConsistencyTests(unittest.TestCase):
+    """Convergencia certificada por el residuo final y balance P/Q (revisión técnica 0.9.0, H7)."""
+
+    def test_converged_state_satisfies_equations(self):
+        sol = nodal.solve(feeder())
+        self.assertEqual(sol['status'], 'converged')
+        self.assertLess(sol['final_residual']['kcl_a'], 1e-6)
+        self.assertLess(sol['final_residual']['constraint_v'], 1e-6)
+        self.assertEqual(nodal.residual(sol), sol['final_residual'])
+
+    def test_power_balance_closes_with_capacitors(self):
+        res = nodal.results(nodal.solve(nodal.from_native(native('delta-compensated.json'))))
+        self.assertLess(res['capacitor_totals']['native'].imag, 0)
+        self.assertLess(res['balance']['Total']['relative'], 1e-9)
+
+    def test_caller_cannot_alter_published_powers(self):
+        model = feeder()
+        powers = np.array([complex(l['p_w'], l['q_var']) for l in model['loads']])
+        sol = nodal.solve(model, powers=powers)
+        powers *= 2
+        self.assertLess(nodal.residual(sol)['kcl_a'], 1e-6)
+
+    def test_network_without_energized_terminals_reports_it(self):
+        model = feeder()
+        model['sources'] = []
+        self.assertEqual(nodal.solve(model)['status'], 'no_energized_terminals')
+
+    def test_disjoint_networks_solved_together_match_separate_runs(self):
+        try:
+            from test_cyme_model import merged, rename, tables
+        except ImportError:
+            from tests.test_cyme_model import merged, rename, tables
+        from nandu import cyme_model
+        alone = nodal.results(nodal.solve(cyme_model.build(tables())))
+        other = rename(tables(), '_2')
+        other['CYMCUSTOMERLOAD'][0]['LoadValue1'] = 150.0  # la segunda red, distinta
+        both = nodal.results(nodal.solve(cyme_model.build(merged(tables(), other))))
+        for bus, phases in alone['voltages'].items():
+            for p, d in phases.items():
+                self.assertAlmostEqual(abs(both['voltages'][bus][p]['v'] - d['v']), 0, places=6)
+        self.assertAlmostEqual(abs(both['balance']['N']['residual']), 0, places=3)
 
 
 if __name__ == '__main__':

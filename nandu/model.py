@@ -93,6 +93,9 @@ def validate(model):
         attached.add(key)
         if (row['network_id'], row['section_id']) not in indices['sections']:
             issue('missing_section', **row)
+        if row['device_type_code'] is None:
+            issue('unsupported_device', network_id=row['network_id'], section=row['section_id'],
+                  device_id=row['device_id'])
     for (net, device, kind), count in attachment_counts.items():
         if count > 1:
             issue('ambiguous_attachment', network_id=net, device_id=device,

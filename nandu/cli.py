@@ -89,7 +89,10 @@ def main(argv=None):
             if args.output:
                 result['report_file'] = args.output
             print(json.dumps(result, indent=2, ensure_ascii=False, allow_nan=False, default=str))
-            return 0 if report['status'] == 'converged' else 2
+            if report['status'] != 'converged':
+                return 2
+            # Convergió, pero se excluyó del cálculo algo que CYME sí calcula: no es un estudio completo.
+            return 3 if report['model_coverage']['status'] == 'incomplete' else 0
         if args.command == 'import-sxst':
             from .sxst_import import import_study
             result = import_study(args.study, args.output, args.networks)

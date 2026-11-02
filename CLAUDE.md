@@ -14,13 +14,13 @@ SQLite, interpreta su semántica y calcula **flujo de carga desbalanceado** y
 por **ingeniería inversa** y se valida contra CYME real mediante el MCP hermano.
 Ñandu no importa código de CYME ni del MCP y no necesita CYME para funcionar.
 
-Versión actual: 0.9.0 (`nandu/__init__.py`, `pyproject.toml`). Ambiente: Windows,
+Versión actual: 0.12.0 (`nandu/__init__.py`, `pyproject.toml`). Ambiente: Windows,
 PowerShell, Python 3.11. Documentación, mensajes y docstrings en español.
 
 ## Comandos
 
 ```powershell
-# Pruebas completas (98; las de OpenDSS y del motor nodal se omiten sin sus paquetes)
+# Pruebas completas (127; las de OpenDSS y del motor nodal se omiten sin sus paquetes)
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 # Una prueba
 .\.venv\Scripts\python.exe -m unittest tests.test_nodal.RegulatorTests.test_closed_delta_relation_and_power_conservation -v
@@ -43,7 +43,8 @@ py -3.11 -m nandu topology data\czu06-czu08.nandu.sqlite
 ```
 
 `loadflow`, `estimate`, `allocate` y `solve` devuelven código 2 si no convergen; errores
-generales, código 1. Entorno: `py -3.11 -m venv .venv` y
+generales, código 1. `loadflow`, `estimate` y `allocate` devuelven código 3 si convergen
+pero `model_coverage.status` es `incomplete` (se excluyó algo que CYME calcula). Entorno: `py -3.11 -m venv .venv` y
 `.\.venv\Scripts\python.exe -m pip install -r requirements-solver.txt`.
 
 ## Arquitectura
@@ -70,7 +71,7 @@ JSON nandu-electrical-network-v1 --powerflow (OpenDSS)--> validación independie
 | `nandu/allocation.py` | Load Allocation (kVA conectado/actual, kWh) ajustada con flujo de carga | numpy, scipy |
 | `nandu/sxst_import.py` | Estudios CYME `.sxst` (XML) → tablas tipo Access → `.nandu.sqlite` | stdlib |
 | `nandu/analysis.py` | Informes JSON y comparación con CSV de CYME | numpy, scipy |
-| `nandu/ui/` | Interfaz tipo CYME: `server.py` (http.server, solo 127.0.0.1), `service.py` (geometría, propiedades, informes), `static/` (HTML/JS/CSS sin dependencias) | stdlib; numpy/scipy al calcular |
+| `nandu/ui/` | Interfaz tipo CYME: `server.py` (http.server, solo 127.0.0.1), `service.py` (geometría, propiedades, informes), `editing.py` (edición de tablas CYME con deshacer y diario; Save As a proyecto nuevo), `static/` (HTML/JS/CSS sin dependencias) | stdlib; numpy/scipy al calcular |
 | `nandu/powerflow.py` | Motor OpenDSS para el formato JSON nativo (validador) | `dss-python` |
 
 ## Reglas del proyecto (no negociables)
@@ -83,7 +84,12 @@ JSON nandu-electrical-network-v1 --powerflow (OpenDSS)--> validación independie
   `ConnectionConfiguration` sí coinciden). Verificar códigos cruzando Access con
   un `.sxst` (XML con enums en texto). Ver la tabla en `docs/`.
 - **Ante datos ambiguos, excluir y reportar** (`model['issues']`, `skipped_elements`),
-  nunca elegir silenciosamente.
+  nunca elegir silenciosamente. Las exclusiones son atómicas: en `cyme_model.build` un
+  tramo o una fila de cliente se arma en estructuras locales y se publica solo si nada
+  falla. Un equipo sin modelo excluye su tramo; nunca se calcula como si no existiera.
+- **Estado publicado consistente:** tensiones, potencias y taps de un resultado deben
+  pertenecer al mismo estado (`nodal.residual`, `results()['balance']`). No mutar
+  arreglos ya entregados a `nodal.solve` para decidir después.
 - **Salidas inmutables:** `save_json` falla si el destino existe. Informes nuevos:
   `data/<redes>-<etapa>-v<versión>.json`. No borrar evidencia de `data/`.
 - Access y las `.mdb` del MCP: solo lectura.
@@ -160,7 +166,12 @@ Precauciones:
    (base de 120 V) sin contraste.
 2. Escritor `.sxst`/Access para devolver resultados a CYME; multiplicadores de Lagrange
    normalizados; medidores intermedios en Load Allocation; modo de taps `Infinite`.
-3. Interfaz: edición de red, vista esquemática y escenarios; transformadores y GD.
+3. Interfaz: vista esquemática y escenarios; transformadores y GD. La edición de red (0.12.0)
+   no mueve aún puntos intermedios (`CYMINTERMEDIATEPOINT`) ni reconecta tramos.
+4. De la revisión técnica de 0.9.0 (`looping/`, respondida en 0.10.0): estimador calibrado
+   con covarianzas propagadas y rango verificado (H6); escalamiento y búsqueda lineal en
+   Newton; validación en alimentadores externos al ajuste (calibración ≠ validación);
+   licencia y CI.
 
 Contraste con CYME en vivo (requiere permiso del usuario; restaurar siempre):
 - Cambiar parámetros con `cyme_set_simulation_properties` y volver al valor `before`.

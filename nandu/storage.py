@@ -71,6 +71,20 @@ def load_tables(path, names):
                 for name in sorted(names)}
 
 
+def load_source(path):
+    """Esquemas y filas de todas las tablas de origen, para derivar un proyecto editado."""
+    path = Path(path).resolve(strict=True)
+    with closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True)) as db:
+        version = db.execute("SELECT value_json FROM metadata WHERE key='format'").fetchone()
+        if not version or json.loads(version[0]) != FORMAT:
+            raise ValueError('Formato de proyecto Ñandu no compatible')
+        schemas = {name: json.loads(cols) for name, cols in db.execute('SELECT table_name, columns_json FROM source_schema')}
+        tables = {name: [] for name in schemas}
+        for name, payload in db.execute('SELECT table_name, payload_json FROM source_records ORDER BY table_name, ordinal'):
+            tables.setdefault(name, []).append(json.loads(payload))
+    return schemas, tables
+
+
 def save_json(path, value):
     """Publicar informe sin reemplazar archivos existentes."""
     path = Path(path).resolve()

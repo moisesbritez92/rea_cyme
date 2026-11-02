@@ -95,6 +95,65 @@ class CymeConventionTests(unittest.TestCase):
 
 
 @unittest.skipUnless(ENGINE, 'requiere numpy y scipy')
+class MeterEdgeCaseTests(unittest.TestCase):
+    """FP unitario y lecturas inválidas (revisión técnica 0.9.0, H5)."""
+
+    def _unity(self):
+        # Cargas sin reactiva, línea resistiva y taps neutros (el delta cerrado con taps desiguales
+        # desfasa y crea Q por fase): la cabecera tiene FP = 100 % exacto.
+        model = feeder(taps=(0, 0, 0))
+        for load in model['loads']:
+            load['q_var'] = 0.0
+        # Sin acoplamiento: con cargas desbalanceadas la mutua también crea Q por fase.
+        model['lines'][0]['z'] = [[0.5 if i == j else 0j for j in range(3)] for i in range(3)]
+        return model
+
+    def test_unity_power_factor_meter_is_finite_and_consistent(self):
+        model = self._unity()
+        meter = head_meter(model)
+        self.assertTrue(all(abs(pf) > 100 - 1e-9 for _, pf in meter['phases'].values()))
+        meter['phases'] = {p: (amps, 100.0) for p, (amps, _) in meter['phases'].items()}
+        est = estimator.estimate(model, [meter], {'quality_indices': True})
+        self.assertEqual(est['status'], 'converged')
+        self.assertLess(est['solution_cost'], 1e-2)
+        kvar = [r for r in est['meter_residuals'] if r['quantity'] == 'reactive_power_kvar']
+        self.assertTrue(all(r['sigma'] > 0 and r['measured'] == 0 for r in kvar))
+
+    def test_unity_power_factor_pulls_reactive_loads_down(self):
+        # Q = 0 medida es información: las pseudomedidas de kvar (σ = 50 %) se acercan a cero.
+        model = feeder()
+        meter = head_meter(model)
+        meter['phases'] = {p: (amps, 100.0) for p, (amps, _) in meter['phases'].items()}
+        est = estimator.estimate(model, [meter])
+        self.assertEqual(est['status'], 'converged')
+        before = sum(r['initial_kva'] for r in est['loads']).imag
+        after = sum(r['estimated_kva'] for r in est['loads']).imag
+        self.assertLess(after, 0.2 * before)
+
+    def test_invalid_readings_are_rejected_with_diagnostic(self):
+        model = feeder()
+        for amps, pf in ((0.0, 95.0), (10.0, 0.0), (10.0, 101.0), (float('nan'), 95.0)):
+            meter = head_meter(model)
+            meter['phases']['A'] = (amps, pf)
+            with self.assertRaises(ValueError):
+                estimator.estimate(model, [meter])
+
+    def test_leading_power_factor_works_in_amp_pf_mode(self):
+        model = feeder()
+        meter = head_meter(model)
+        meter['phases']['A'] = (meter['phases']['A'][0], -meter['phases']['A'][1])
+        est = estimator.estimate(model, [meter], {'meter_model': 'amp_pf'})
+        self.assertEqual(est['status'], 'converged')
+        self.assertTrue(all(r['sigma'] > 0 for r in est['meter_residuals']))
+
+    def test_published_estimate_satisfies_network_equations(self):
+        model = feeder()
+        est = estimator.estimate(model, [head_meter(model, factor=1.1)])
+        self.assertEqual(est['status'], 'converged')
+        self.assertLess(est['final_residual']['kcl_a'], 1e-6)
+
+
+@unittest.skipUnless(ENGINE, 'requiere numpy y scipy')
 class QualityIndexTests(unittest.TestCase):
     def test_diagonal_matches_dense_inverse(self):
         import scipy.sparse as sp

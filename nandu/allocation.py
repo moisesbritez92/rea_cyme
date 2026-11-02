@@ -112,30 +112,37 @@ def allocate(model, meters, method='KVAMethod', tolerance_pct=0.5, max_iteration
             break
         initial = sol['x']
         res = nodal.results(sol)
-        worst = 0.0
+        got = {key: res['sources'][key[0]]['power'][key[1]] for key in groups}
+        worst = max(abs(targets[i][p] - got[(i, p)]) / abs(targets[i][p]) for i, p in groups)
+        history.append({'iteration': it, 'max_mismatch_pct': 100 * worst})
+        # Se decide antes de actualizar: las potencias publicadas son las del flujo resuelto.
+        if 100 * worst <= tolerance_pct:
+            status = 'converged'
+            break
         for key, (members, share) in groups.items():
             ident, p = key
-            got = res['sources'][ident]['power'][p]
-            error = targets[ident][p] - got
-            worst = max(worst, abs(error) / abs(targets[ident][p]))
+            error = targets[ident][p] - got[key]
             # Secante compleja: d(cabecera)/d(demanda) ~ 1 + pérdidas incrementales.
             slope = 1.0
             if key in previous:
-                d_dem, d_got = demand[key] - previous[key][0], got - previous[key][1]
+                d_dem, d_got = demand[key] - previous[key][0], got[key] - previous[key][1]
                 if abs(d_dem) > 1e-6 * abs(targets[ident][p]):
                     slope = d_got / d_dem
                     if not 0.5 <= abs(slope) <= 3.0:
                         slope = 1.0
-            previous[key] = (demand[key], got)
+            previous[key] = (demand[key], got[key])
             demand[key] += error / slope
             powers[members] = demand[key] * share
         if balanced_rows:
             _balance_rows(powers, loads)
-        history.append({'iteration': it, 'max_mismatch_pct': 100 * worst})
-        if 100 * worst <= tolerance_pct:
-            status = 'converged'
-            break
+    if sol is not None and sol['status'] == 'converged':
+        powers = sol['powers'].copy()  # sin convergencia del reparto: último estado resuelto, no uno sin calcular
     zero = sum(1 for members, share in groups.values() for s in share if s == 0)
+    check = None
+    if sol is not None and sol['status'] == 'converged':
+        res = nodal.results(sol)
+        check = {'residual': nodal.residual(sol),
+                 'balance_relative': {net: b['relative'] for net, b in res['balance'].items()}}
     return {'status': status, 'method': method, 'iterations': history, 'powers': powers, 'prepared': prepared,
             'targets': targets, 'groups': {f'{k[0]}:{k[1]}': len(v[0]) for k, v in groups.items()},
-            'zero_weight_loads': zero, 'solution': sol}
+            'zero_weight_loads': zero, 'solution': sol, 'consistency': check}

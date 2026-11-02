@@ -32,11 +32,15 @@ def _summary(model, res):
                  if model['buses'][bus]['network_id'] == net and not model['buses'][bus]['internal']
                  for p, d in ph.items() if not d.get('deenergized')]
         src = [s for s in res['sources'].values() if s['network_id'] == net]
+        balance = res['balance'][net]
         out[net] = {
             'source_current_a': {p: round(abs(c), 4) for s in src for p, c in s['current'].items()},
             'source_power': _kw(sum((v for s in src for v in s['power'].values()), 0j)),
             'load_power': _kw(res['load_totals'].get(net, 0j)),
             'line_losses': _kw(res['line_losses'].get(net, 0j)),
+            'capacitor_power': _kw(res['capacitor_totals'].get(net, 0j)),
+            # fuente - carga - pérdidas de línea (incluye carga capacitiva de líneas) - capacitores
+            'balance_residual': {**_kw(balance['residual']), 'relative': float(f'{balance["relative"]:.3e}')},
             'min_voltage': dict(zip(('pu', 'node', 'phase'), min(volts))) if volts else None,
             'max_voltage': dict(zip(('pu', 'node', 'phase'), max(volts))) if volts else None,
             'deenergized_terminals': sum(1 for bus, ph in res['voltages'].items()
@@ -77,6 +81,7 @@ def _header(path, model, kind):
     return {'report_format': f'nandu-{kind}-v1', 'nandu_version': __version__, 'source_file': str(Path(path)),
             'source_sha256': provenance.get('source_sha256'), 'networks': model['networks'],
             'conventions': model['conventions'], 'model_issues': model['issues'],
+            'model_coverage': cyme_model.coverage(model),
             'model_counts': {k: len(model[k]) for k in ('buses', 'lines', 'switches', 'regulators', 'loads',
                                                          'capacitors', 'sources')}}
 
@@ -87,6 +92,7 @@ def load_flow(path, networks=None, details=False, include_line_charging=True):
     report = {**_header(path, model, 'load-flow'), 'engine': 'nandu.nodal: nodal aumentado + Newton-Raphson',
               'status': sol['status'], 'iterations': sol['iterations'],
               'regulator_tap_control': sol['tap_control'],
+              'final_residual': sol.get('final_residual'),
               'skipped_elements': sol['system']['skipped']}
     if sol['status'] == 'converged':
         res = nodal.results(sol)
@@ -104,6 +110,7 @@ def estimate(path, networks=None, details=False, options=None):
               'iterations': est['iterations'], 'options': est['options'], 'solution_cost': est['solution_cost'],
               'measurement_count': est['measurements'], 'state_variable_count': est['state_variables'],
               'constraint_count': est['constraints'], 'meter_residuals': est['meter_residuals'],
+              'final_residual': est['final_residual'],
               'initial_allocation': est['initial_allocation'], 'quality_indices': est['quality_indices'],
               'load_model_note': est['load_model_note'],
               'meter_convention': 'CYMNETWORKMETER DemandType=3 leído como AMP_PF (A, FP %): hipótesis'}
@@ -131,6 +138,7 @@ def allocate(path, networks=None, details=False, method='KVAMethod'):
     report = {**_header(path, model, 'load-allocation'), 'engine': 'nandu.allocation: método CYME + flujo de carga',
               'status': alloc['status'], 'method': method, 'iterations': alloc['iterations'],
               'zero_weight_loads': alloc['zero_weight_loads'], 'loads_per_meter_phase': alloc['groups'],
+              'consistency': alloc['consistency'],
               'targets': {src: {p: _kw(s) for p, s in t.items()} for src, t in alloc['targets'].items()},
               'meter_convention': 'CYMNETWORKMETER DemandType=3 leído como AMP_PF (A, FP %): hipótesis'}
     if alloc['status'] == 'converged':
@@ -147,17 +155,23 @@ def allocate(path, networks=None, details=False, method='KVAMethod'):
 
 
 def compare_voltages(report, csv_path, top=15):
-    """Compara VLNA/B/C (kV) de un CSV exportado por el MCP de CYME con un informe detallado."""
+    """Compara magnitudes VLNA/B/C (kV) de un CSV exportado por el MCP de CYME con un informe detallado.
+
+    La clave es (nodo, fase): los NodeId de CYME son globales (CONVENTIONS['identity']).
+    La cobertura es simétrica: también se cuentan los terminales energizados de Ñandu
+    (no internos) que el CSV no trae. No compara ángulos, corrientes ni pérdidas.
+    """
     ours = {(n['node'], n['phase']): n['v_ln_kv'] for n in report.get('nodes', [])}
     if not ours:
         raise ValueError('El informe no tiene tensiones por nodo; generarlo con --details')
-    diffs, missing = [], 0
+    diffs, missing, seen = [], 0, set()
     with open(csv_path, encoding='utf-8-sig', newline='') as stream:
         for row in csv.DictReader(stream):
             for p in ABC:
                 raw = row.get(f'VLN{p}')
                 if raw in (None, ''):
                     continue
+                seen.add((row['node_id'], p))
                 cyme = float(raw)
                 mine = ours.get((row['node_id'], p))
                 if mine is None:
@@ -171,7 +185,11 @@ def compare_voltages(report, csv_path, top=15):
         raise ValueError('No hay nodos comunes con tensión en el CSV')
     errors = sorted(abs(d['diff_v']) for d in diffs)
     pick = lambda q: errors[min(len(errors) - 1, int(q * len(errors)))]
+    extra = sorted(f'{n["node"]}:{n["phase"]}' for n in report['nodes']
+                   if not n['internal'] and n['v_ln_kv'] and (n['node'], n['phase']) not in seen)
     return {'compared_terminals': len(diffs), 'missing_in_nandu': missing,
+            'missing_in_cyme': len(extra), 'missing_in_cyme_sample': extra[:top],
+            'scope': 'magnitud de tensión fase-neutro por (nodo, fase)',
             'abs_diff_v': {'max': errors[-1], 'p95': pick(0.95), 'median': pick(0.5),
                            'rms': round(math.sqrt(sum(e * e for e in errors) / len(errors)), 3)},
             'worst': sorted(diffs, key=lambda d: -abs(d['diff_v']))[:top]}

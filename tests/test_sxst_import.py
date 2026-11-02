@@ -108,18 +108,37 @@ class SxstTests(unittest.TestCase):
         self.assertEqual(kw, 10.0)
         self.assertAlmostEqual(kvar, -7.5)
 
-    def test_imported_study_builds_a_complete_model(self):
+    def test_imported_study_without_unsupported_devices_builds_a_complete_model(self):
+        self.study.write_text(STUDY.replace('<Transformer><DeviceNumber>T1</DeviceNumber></Transformer>', ''),
+                              encoding='utf-8')
         output = Path(self.tmp.name) / 'estudio.nandu.sqlite'
         result = import_study(self.study, output)
         self.assertEqual(result['networks'], ['N'])
         self.assertEqual(inspect(output)['provenance']['source_format'], 'cyme-sxst')
         model = cyme_model.build(load_tables(output, cyme_model.TABLES))
         self.assertEqual([i['code'] for i in model['issues']], [])
+        self.assertEqual(cyme_model.coverage(model)['status'], 'complete')
         self.assertEqual(model['regulators'][0]['control']['mode'], 'terminal')
         self.assertEqual(model['loads'][0]['phases'], ['B'])
         self.assertTrue(model['loads'][0]['locked'])
         with self.assertRaises(FileExistsError):
             import_study(self.study, output)
+
+    def test_unsupported_series_device_excludes_its_section(self):
+        # Un transformador sin modelo no puede desaparecer: el tramo entero queda fuera y se reporta.
+        output = Path(self.tmp.name) / 'estudio.nandu.sqlite'
+        result = import_study(self.study, output)
+        self.assertEqual(result['unsupported_devices'], {'Transformer': 1})
+        self.assertEqual(result['validation_status'], 'issues_found')
+        model = cyme_model.build(load_tables(output, cyme_model.TABLES))
+        excluded = [i for i in model['issues'] if i['code'] == 'section_excluded']
+        self.assertEqual([(i['section_id'], 'Transformer' in i['reason']) for i in excluded], [('s2', True)])
+        self.assertFalse([l for l in model['lines'] if l['section_id'] == 's2'])
+        self.assertFalse(model['loads'])
+        self.assertNotIn('n2', model['buses'])
+        cov = cyme_model.coverage(model)
+        self.assertEqual((cov['status'], cov['excluded_sections']), ('incomplete', 1))
+        self.assertAlmostEqual(cov['excluded_load_kw'], 40.0)
 
 
 if __name__ == '__main__':

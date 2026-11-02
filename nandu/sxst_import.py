@@ -183,7 +183,14 @@ def read(path, network_ids=None, load_model_id='1'):
             code = DEVICE_CODE.get(dev.tag)
             number = _text(dev, 'DeviceNumber')
             if code is None:
+                # Se conserva la asociación sin código Access: el tramo no puede validarse como
+                # circuito completo y cyme_model lo excluye en lugar de calcularlo sin el equipo.
                 unsupported[dev.tag] = unsupported.get(dev.tag, 0) + 1
+                t['CYMSECTIONDEVICE'].append({'NetworkId': net, 'SectionId': sid, 'DeviceNumber': number,
+                                              'DeviceType': None, 'DeviceTypeText': dev.tag,
+                                              'Location': LOCATION.get(_text(dev, 'Location'), 0)})
+                issues.append({'code': 'unsupported_device', 'network_id': net, 'section_id': sid,
+                               'device_id': number, 'device_type': dev.tag})
                 continue
             t['CYMSECTIONDEVICE'].append({'NetworkId': net, 'SectionId': sid, 'DeviceNumber': number, 'DeviceType': code,
                                           'Location': LOCATION.get(_text(dev, 'Location'), 0)})

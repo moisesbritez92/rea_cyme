@@ -2,26 +2,28 @@
 
 Software para modelar y analizar redes eléctricas de distribución.
 
-## Versión actual: 0.9.0
+## Versión actual: 0.12.0
 
-Importa redes de una base CYME Access a un archivo SQLite independiente. Conserva
-las filas originales y construye un modelo estructural de redes, nodos, tramos,
-asociaciones de dispositivos, fuentes y cargas. Incluye auditoría de referencias,
-duplicados y cargas sin asociación. La importación no requiere CYME abierto.
+Reimplementación independiente de CYME 9.0 para redes de distribución. Importa
+bases Access y estudios `.sxst` de CYME a un archivo SQLite propio, conserva las
+filas originales y construye un modelo eléctrico por fase. Calcula con un motor
+nodal propio:
 
-Incluye análisis de conectividad condicional por fase y un motor OpenDSS para
-redes nativas explícitas. Todavía no incluye interfaz gráfica ni equivalencia
-numérica validada con CYME.
+- **Flujo de carga desbalanceado** (Newton, nodal aumentado), con control de taps.
+- **Estimación de estado** WLS con restricciones (Hachtel) e índices de calidad.
+- **Distribución de carga** (Load Allocation) por kVA conectado, kVA actual o kWh.
 
-La versión 0.3.0 añade resolución de equipos y preparación eléctrica provisional
-con perfiles explícitos de unidades y códigos Access.
+Incluye una interfaz local tipo CYME (`nandu ui`), con edición de la red (tramos, equipos,
+cargas y catálogos). No necesita CYME para calcular.
 
-La versión 0.4.0 calcula flujo de carga de una fuente trifásica, líneas matriciales
-y cargas PQ monofásicas conectadas en estrella aterrizada. Los modelos CYME
-importados siguen pendientes de conversión/validación antes de ejecutar ese motor.
-
-La versión 0.5.0 amplía el motor con cargas PQ entre dos fases y capacitores
-conectados fase-neutro o fase-fase, especificados por rama.
+**Alcance demostrado y límites.** El flujo se contrastó con CYME en dos
+alimentadores (CZU06/CZU08): 2.690 tensiones, 11,2 V de diferencia máxima. Es un
+resultado de magnitudes de tensión en esas redes, no una equivalencia general.
+No hay transformadores, generación distribuida, cortocircuito ni protecciones.
+Cada informe declara su cobertura (`model_coverage`), el residuo de las ecuaciones
+en el estado publicado (`final_residual`) y el balance P/Q por red. Un cálculo que
+converge pero dejó fuera algo que CYME calcula termina con código 3. El historial
+por versión sigue abajo; las cifras de versiones anteriores son históricas.
 
 ## Ejecutar
 
@@ -428,7 +430,8 @@ Converge en 4 iteraciones (0,14 s; 3.213 terminales). El balance fuente = cargas
 pérdidas cierra al vatio. Medidores de la base: CZU06 188,1/158,7/161,0 A,
 CZU08 159,9/199,1/195,0 A, FP 95 %. El estimador converge en 5 iteraciones con
 costo J = 31,5, residuos de medidores menores que 2σ y cargas estimadas de
-5.733 kW (CZU06) y 6.069 kW (CZU08).
+5.733 kW (CZU06) y 6.069 kW (CZU08). *Histórico (0.6.0, medidor como |I| y FP):
+desde 0.9.0 el modelo por defecto es |I|, P y Q y da J = 95,925.*
 Informes: `data/czu06-czu08-loadflow-v060.json`, `data/czu06-czu08-estimate-v060.json`.
 
 Verificación: **73 pruebas correctas** en `.venv`. El motor nuevo reproduce la
@@ -486,8 +489,8 @@ Informe: `data/czu06-czu08-20261019-loadflow-vs-cyme-v060.json`.
 Aplicación local con la disposición de CYME: menú (File, View, Analysis, Reports,
 Help), barra de herramientas, **Explorer** a la izquierda, **unifilar
 geográfico** en el centro, **Properties** a la derecha y **Simulation Result**
-abajo. Usa solo la biblioteca estándar en el servidor y HTML/JS/CSS propios, sin
-internet. Escucha únicamente en `127.0.0.1` y solo abre archivos `.nandu.sqlite`
+abajo. Usa solo la biblioteca estándar en el servidor y HTML/JS/CSS propios.
+Escucha únicamente en `127.0.0.1` y solo abre archivos `.nandu.sqlite`
 de la carpeta de datos.
 
 - Unifilar con coordenadas EPSG:32721 de la base. Usa el color de cada red
@@ -495,6 +498,12 @@ de la carpeta de datos.
   como CYME. Tiene símbolos de fuente, regulador, interruptor, reconectador,
   seccionador, fusible, capacitor y carga. Zoom con la rueda, desplazamiento
   arrastrando y doble clic para acercar.
+- Selector de fondo **None / OpenStreetMap / Satellite (Esri)** en la barra: convierte
+  posiciones UTM WGS84 (EPSG:32601–32660 y 32701–32760) a EPSG:3857 y superpone
+  las redes sobre teselas. Requiere internet solo al elegir un fondo; con otros
+  sistemas de coordenadas las opciones de mapa quedan deshabilitadas. Cada fondo
+  muestra su atribución y `None` vuelve al diagrama sin conexión. Al alternar entre
+  callejero y satélite se conserva el zoom y el desplazamiento.
 - Capas de color: color de red, fase, nivel de tensión (%) y nivel de carga (%).
   Esta última usa las bandas y la paleta de la capa «Loading level color(%)» de CYME.
   Capas de etiquetas: tensiones por nodo, corrientes por tramo e identificadores.
@@ -539,7 +548,7 @@ los índices de calidad:
 - Residuos normalizados r_N = |r| / √Ω_ii, con Ω = diag de R·E11·R del sistema de
   Hachtel, obtenida con una sola factorización LU.
 
-En CZU06/CZU08, J = 31,5 supera el umbral (21,0 con 12 g.l.): la incoherencia entre
+En CZU06/CZU08 (modelo de medidor de 0.8.0, histórico), J = 31,5 supera el umbral (21,0 con 12 g.l.): la incoherencia entre
 el FP medido (0,95) y el de las cargas (≈0,967) aparece como dato sospechoso. Los
 umbrales de residuos (3 y 4) son parámetros, no valores leídos de CYME.
 
@@ -626,3 +635,239 @@ comportamiento se mantiene a propósito.
 
 Verificación: **98 pruebas correctas** (filas ABC equilibradas, cargas bloqueadas en
 el estimador, medidas |I|/P/Q).
+
+## Integridad del modelo y consistencia de resultados — 0.10.0
+
+Responde a la revisión técnica externa de 0.9.0 (19 oct. 2026). Cada hallazgo
+reproducido tiene ahora una prueba de regresión con la expectativa corregida.
+
+**Modelo (H1–H3).**
+
+- Un equipo de un `.sxst` sin modelo en Ñandu (p. ej. `Transformer`) ya no
+  desaparece. Su asociación se conserva sin código Access, la auditoría estructural
+  la marca `unsupported_device` y `cyme_model` excluye el tramo entero en lugar de
+  calcularlo como si el equipo no existiera.
+- Las exclusiones son atómicas. Un tramo o una fila de cliente se valida entera en
+  estructuras locales y solo se publica si nada falla. Antes, un capacitor inválido
+  dejaba incorporadas las líneas del tramo, y una carga delta que fallaba en su
+  segunda rama dejaba la primera (45 kW).
+- Identificadores entre redes (`CONVENTIONS['identity']`, hipótesis). Los `NodeId`
+  son globales y un nodo compartido es frontera. Un `SectionId`, un dispositivo
+  (tipo, número) o una fuente repetidos entre las redes calculadas se excluyen con
+  todos sus implicados y se reportan. Antes se fusionaban en silencio y el sistema
+  quedaba singular. Dos redes disjuntas calculadas juntas dan las mismas tensiones
+  que por separado (prueba).
+
+**Resultados (H4, H7).**
+
+- Load Allocation decide la convergencia antes de actualizar las potencias. Las
+  potencias publicadas son las del último flujo resuelto, y `nodal.solve` copia el
+  arreglo que recibe. En CZU08 el residuo `fuente − cargas − pérdidas` pasa de
+  −4,5 kW a 2e-11 relativo: la fuente (7.134,232 kW) y las pérdidas (1.209,086 kW) no
+  cambian; la carga publicada pasa de 5.929,669 a 5.925,146 kW. Contra CYME en CZU06
+  mejora de 0,896 a **0,876 kVA RMS** (máx. 6,98 → 6,65 kVA; 388 potencias por fase).
+- `nodal.solve` converge solo si, después del último paso, la corriente no balanceada
+  (≤ 1e-6 A) y las restricciones de tensión (≤ 1e-6 V) cumplen sus tolerancias,
+  separadas por unidad. El estimador exige además factibilidad del estado publicado.
+- Los resultados incluyen `capacitor_totals` y `balance` por red; el informe CLI
+  muestra `capacitor_power` y `balance_residual`. En CZU06 la partida que faltaba en
+  el resumen era la de capacitores (−325,137 kvar).
+
+**Cobertura (separada del estado del solver).** `model_coverage.status` vale
+`complete`, `cyme_equivalent_exclusions` (solo exclusiones que CYME también hace,
+como las cargas ABC sobre tramos monofásicos), `approximated` o `incomplete`, con la
+potencia excluida en kW/kvar. `loadflow`, `estimate` y `allocate` devuelven
+**código 3** si convergen con cobertura `incomplete`. Las cargas sin energía figuran
+en `skipped_elements.loads`. `--compare-cyme` cuenta también los terminales de
+Ñandu que el CSV no trae (`missing_in_cyme`).
+
+**Estimador (H5, H6).** Las lecturas A-FP se validan (corriente > 0, 0 < |FP| ≤ 100)
+y se rechazan con diagnóstico. La σ de P y Q del medidor tiene un piso de 0,1 % de
+la potencia aparente medida (`meter_sigma_floor_pct_of_s`, hipótesis de ingeniería):
+con FP = 100 % el estimador converge en vez de dividir por cero. En CZU06/CZU08 el
+piso no actúa. Los índices de calidad llevan `calibration`: en el modo compatible
+con CYME, |I|, P y Q de un mismo par A-FP se ponderan como independientes y los
+grados de libertad no verifican rango, así que χ² y la clasificación de residuos
+son orientativos. La formulación calibrada (covarianzas propagadas) queda pendiente.
+
+**Interfaz (H8).** La sobrecarga se evalúa por fase (`loading_pct_phase`). Con
+120/50/50 A y 100 A de capacidad, solo A figura sobrecargada. La potencia de paso
+conserva el signo (positivo en sentido From → To).
+
+**CZU06/CZU08 con 0.10.0** (`data/czu06-czu08-20261019-*-v0100.json`):
+
+| Cálculo | Resultado |
+|---|---|
+| Flujo frente a CYME (tol. 0,001 %) | 2.690 terminales; 0 faltantes en ambos sentidos; 11,171 V máx., 9,956 V p95, 5,517 V RMS (sin cambios) |
+| Residuo final del flujo | 3,9e-8 A; balance P/Q relativo ≤ 6e-11 por red |
+| Cobertura | `cyme_equivalent_exclusions` (ANDE_19787 y ANDE_2424) |
+| Load Allocation KVAMethod | 17 flujos; 0,423 % de desajuste; 174 cargas sin peso; balance ≤ 2e-11 |
+| Estimador `--quality` | 6 iteraciones; J = 95,925 (sin cambios); residuo KCL 3,6e-8 A |
+
+Pendientes de la revisión: covarianzas y rango en el estimador (H6), escalamiento y
+búsqueda lineal en Newton, validación en alimentadores externos al ajuste,
+transformadores, licencia y CI.
+
+Verificación: **116 pruebas correctas**, ninguna omitida.
+
+## Ventana de informes tipo CYME — 0.11.0
+
+La ventana **Simulation Result** se acerca a la de informes de CYME:
+
+- **Tablas** (Buses, Lines and Cables, Regulators, Shunt Capacitors, Voltage Profile,
+  Load Values): orden por columna (clic en el encabezado: ascendente, descendente, sin
+  orden; los vacíos quedan al final), selector **Columns** con columnas opcionales
+  ocultas por defecto (ángulos, carga por fase, distancia, tap máximo), filtro de texto
+  sobre todas las celdas y contador de filas. Se muestran las primeras 3.000 filas; la
+  exportación incluye todas.
+- **Exportación** de cualquier informe, con el filtro, el orden y las columnas
+  visibles: **Copy** (separado por tabuladores, para pegar en Excel), **CSV** (UTF-8
+  con BOM, punto decimal) y **Excel** (`.xlsx` Office Open XML generado en el
+  navegador, sin dependencias; los números se guardan como números y no como texto).
+- **Altura del panel**: se arrastra la barra «Simulation Result» hacia arriba o abajo;
+  doble clic la maximiza y vuelve a la altura anterior. La altura se recuerda en el
+  navegador. El perfil de tensión se dibuja al tamaño del panel o de la ventana
+  desacoplada.
+- **Detach**: abre el informe en una ventana propia del navegador, que se actualiza
+  con cada cálculo. Se pueden tener varias a la vez, y al hacer clic en una fila se
+  selecciona el elemento en el unifilar principal.
+- Informes nuevos, calculados en `ui/service.py` a partir del mismo estado publicado
+  por el motor:
+  - **Regulators**: uno por fase. Incluye tap final (después del control de taps),
+    tensiones de entrada y salida, corriente y, si hay control, la tensión de control
+    sobre la base de 120 V (`nodal.control_voltages`) con su consigna y ancho de banda.
+  - **Shunt Capacitors**: kvar nominales y entregados a la tensión calculada
+    (Q·|V|²/Vn², el mismo modelo de impedancia constante del motor), y «Loading (%)»
+    con la definición de CYME (kvar entregados / nominales).
+  - **Voltage Profile**: tensión (%) por fase en función de la distancia a la fuente.
+    Muestra todos los nodos como puntos y el camino fuente → nodo seleccionado (o el
+    más lejano) como líneas por fase. La distancia es la suma de longitudes de línea
+    (Dijkstra desde las fuentes) y no cruza maniobras abiertas en todas sus fases.
+    Los colores de fase son los del unifilar (convención CYME). Como rojo y verde no
+    se distinguen con deuteranopía, cada fase tiene además su propio trazo y una
+    etiqueta directa.
+- Connection y Tap Mode usan los textos de CYME (`Yg`, `D`, `ClosedDelta`,
+  `FixedTap`, `LoadCenter`, `RXSettings`, `Terminal`). El código Access 4
+  (FixedTapPrimary) se informa como `FixedTap`, porque el modelo lo trata igual.
+
+Verificación: **120 pruebas correctas**. Cuatro son nuevas:
+- Informes de regulador y perfil en la red sintética: la distancia final es la suma de
+  longitudes, los taps por fase son los del modelo y la potencia aparente de entrada
+  es igual a la de salida.
+- Perfil sin cruzar un enlace abierto y sin contar dos veces una línea partida.
+- kvar entregados y «Loading (%)» de un capacitor a 1,05 Vn (110,25 %).
+
+El `.xlsx` lo abrió Microsoft Excel por COM: números como `Double`, encabezados en
+negrita y caracteres `<&>"Ñ` correctos. Revisión en Chrome: orden, columnas y perfil,
+sin errores de página. La ventana desacoplada se abre (evento de popup), pero su
+contenido no se capturó.
+
+**Contraste con CYME en vivo — 27 de octubre de 2026.** CZU06/CZU08 se cargaron desde
+`BD_Centro0926.mdb` sin modificaciones (corrida `nandu-reports-czu-20261027-01`) y se
+exportaron sin guardar el estudio (`data/cyme-czu06-czu08-20261027/`). El SHA-256 de la
+base ya no era el de la importación del 18 de octubre, así que se reimportó a
+`data/czu06-czu08-20261027.nandu.sqlite`. Las 230 tablas importadas resultaron
+idénticas a las de las importaciones del 18 y del 19 de octubre: el hash cambió por
+bytes internos de Access, no por los datos. Detalle en
+`data/czu06-czu08-20261027-ui-reports-v0110.json` y `...-ui-capacitors-v0110.json`.
+
+| Informe | Resultado frente a CYME |
+|---|---|
+| Regulators: taps | 12/12 iguales (4 reguladores × 3 fases) |
+| Regulators: V in / V out | ≤ 13,1 V (mismo orden que el residuo del flujo) |
+| Regulators: corriente | ≤ 0,4 A; CYME informa la corriente del lado de entrada |
+| Shunt Capacitors: kvar nominales | 3/3 iguales |
+| Shunt Capacitors: kvar entregados | 9/9 fases ≤ 0,56 kvar; el «Loading (%)» de CYME es Q/Qn = (V/Vn)², no V/Vn |
+| Voltage Profile: distancia | 1.304 nodos, ≤ 0,05 m (redondeo); los 3 nodos sin energía faltan en ambos |
+| Tensiones nodo a nodo | 2.690 terminales; 17,4 V máx. con la tolerancia por defecto de CYME (0,1 %); 11,171 V frente a la corrida de CYME a 0,001 % del 19 oct., sin cambios |
+
+El contraste corrigió tres errores de la primera versión:
+- La entrada y la salida se tomaban del sentido del tramo. En `RT_CZU_06_100A_3` el
+  tramo apunta contra el flujo y salían invertidas (1,4 kV). Ahora se usan
+  `input_bus`/`output_bus`, los mismos que orienta el motor.
+- La corriente era la del lado de salida y quedaba entre 4 y 15 % por debajo de la de
+  CYME (el cociente es Vout/Vin). Ahora `I (A)` es la de entrada, Mᵀ·I_salida, y la
+  de salida queda en la columna opcional `I out (A)`.
+- La distancia contaba dos veces las líneas partidas por cargas al medio: 14,9 km de
+  error a 87 km de la fuente.
+
+Las tensiones de CYME de hoy son idénticas (0,0 V) a las de su corrida del 19 de
+octubre con la tolerancia por defecto. La corrida a 0,001 % se separa de ellas hasta
+7,3 V. Los 17,4 V incluyen ese error de convergencia de CYME, y las diferencias de
+tensión de los reguladores (≤ 13 V) también. El contraste exacto sigue siendo el de
+0,001 % (11,171 V, pendiente sin explicar).
+
+## Edición de red en la interfaz — 0.12.0
+
+La interfaz permite editar la red como en CYME. Las ediciones se hacen sobre las mismas
+filas de Access (`CYMSECTION`, `CYMSECTIONDEVICE`, `CYMNODE`, tablas de equipos,
+`CYMCUSTOMERLOAD`, catálogos `CYMEQ*`), de modo que la red editada se recalcula con el
+mismo `cyme_model.build` y se puede guardar como proyecto Ñandu.
+
+- **Modo edición** (botón **Edit** o menú Edit). En Properties, los campos editables
+  pasan a ser controles y cada grupo tiene **Apply** (también Enter) y **Reset**. Los
+  campos con dominio conocido son listas: fases 1..7, ClosedPhase, Location,
+  ConnectionConfiguration, SettingOption y LoadValueType con los códigos verificados,
+  y los identificadores de equipo (LineId, CableId, EquipmentId, ConsumerClassId) con
+  las filas de su catálogo. Los números se escriben con punto o coma decimal y se
+  guardan con el tipo que ya tiene la columna. Identidad y conectividad (NetworkId,
+  SectionId, DeviceNumber, FromNodeId, ToNodeId...) no se editan como campos: tienen
+  operaciones propias. Un grupo «Equipment» edita la fila del catálogo, compartida por
+  todos los equipos que la usan (el título indica cuántos).
+- **Mover nodos**: arrastrar un nodo en modo edición. Con fondo de mapa, la posición se
+  convierte de EPSG:3857 al UTM del proyecto (ida y vuelta < 0,1 mm). La longitud
+  eléctrica (`Length`) no cambia al mover nodos, como en CYME: es un dato del tramo.
+- **Menú contextual** (clic derecho en modo edición): en un nodo, *Add section from this
+  node*; en un tramo, *Add device ▸* (Switch, Fuse, Breaker, Recloser, Regulator, Shunt
+  Capacitor, Spot Load), *Delete <equipo>*, *Add section from To node* y *Delete
+  section* (también la tecla Supr).
+- **Alta de tramo**: desde un nodo se hace clic en otro nodo o en un punto vacío (nodo
+  nuevo). El diálogo pide identificador (automático si se deja vacío), fase, tipo de
+  conductor, equipo del catálogo y longitud (por defecto, la distancia dibujada).
+- **Undo** (Ctrl+Z) deshace operación por operación; un grupo de propiedades aplicado de
+  una vez se deshace junto.
+- **Save As** (Ctrl+S): guarda la red editada como un `.nandu.sqlite` nuevo en la
+  carpeta de datos y lo abre. El original no se modifica y un destino existente no se
+  reemplaza. La procedencia del archivo nuevo guarda el archivo de origen con su
+  SHA-256 y el diario completo de cambios (valores antes y después, plantillas usadas).
+
+Cualquier edición borra el resultado calculado: tensiones y flujos de la red anterior
+no corresponden a la editada. Las ediciones viven en la memoria del servidor hasta
+guardarlas; recargar la página las conserva, cerrar el servidor las pierde.
+
+**Reglas de Ñandu, no semántica de CYME.** Las siguientes decisiones son de la
+interfaz y no se contrastaron con CYME:
+- Un equipo nuevo copia una fila existente del mismo tipo (de la misma red si hay) y
+  cambia identidad, red y ubicación; las maniobras quedan cerradas en las fases del
+  tramo, y la carga nueva arranca en 0 kW / 0 kvar con las fases del tramo. Si la base
+  no tiene ninguna maniobra de ese tipo, se crea una fila mínima con las columnas que
+  lee `cyme_model` (en servicio, cerrada). Reguladores, capacitores y cargas necesitan
+  una fila existente como plantilla.
+- Un tramo nuevo copia un conductor existente del tipo elegido y toma la fase del tramo
+  conectado al nodo de partida (ABC si no hay).
+- Borrar un tramo borra sus equipos, sus clientes, los ajustes LDC de sus reguladores y
+  sus puntos intermedios. Los nodos que quedan sin tramos, fuente ni medidor también se
+  borran.
+- El conductor no se borra solo: para quitarlo se borra el tramo.
+
+Toda operación es atómica: si algo falla (código no verificado, equipo inexistente en el
+catálogo, identificador repetido), las tablas quedan como estaban y el error se muestra.
+
+Verificación: **127 pruebas correctas**. Siete son nuevas (`tests/test_ui.py`,
+`EditingTests`):
+- Propiedades con destino de edición y opciones verificadas.
+- Edición que reconstruye el modelo, borra el resultado y se deshace.
+- Valores inválidos sin efecto, incluso dentro de un lote.
+- Alta de tramo, carga y seccionador, y borrado con limpieza de nodos.
+- El conductor no se borra solo.
+- Coordenadas de mapa guardadas en el UTM del proyecto.
+- Save As con diario de cambios, sin tocar el original y sin reemplazar un destino.
+
+Sobre CZU06/CZU08 (copia en una carpeta temporal) se agregaron los siete tipos de
+equipo en un tramo y un tramo nuevo con una carga de 100 kW. El flujo converge, sin
+avisos nuevos del modelo, y el archivo guardado reabre con su diario. La API se probó
+por HTTP: alta, código inválido (400), deshacer, nombre de archivo con `../` (400) y
+Save As. La página carga con el menú Edit y los botones nuevos. La interacción con el
+mouse (arrastre, menú contextual, diálogos) no se pudo automatizar: la herramienta de
+captura del navegador no respondió.
+

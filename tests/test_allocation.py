@@ -4,6 +4,7 @@ import unittest
 
 ENGINE = all(importlib.util.find_spec(m) for m in ('numpy', 'scipy'))
 if ENGINE:
+    import numpy as np
     from nandu import allocation, estimator, nodal
     try:  # discover -s tests pone la carpeta en sys.path; un paquete 'tests' ajeno puede taparla
         from test_nodal import feeder
@@ -74,6 +75,23 @@ class AllocationTests(unittest.TestCase):
         self.assertAlmostEqual(abs(p['abc:A']), abs(res['targets']['src']['B']), places=6)
         free = allocation.allocate(model, [unbalanced], use_load_flow=False, balanced_rows=False)
         self.assertNotEqual(self._by_id(free)['abc:A'], self._by_id(free)['abc:C'])
+
+    def test_published_powers_and_voltages_belong_to_the_same_state(self):
+        # Revisión técnica 0.9.0, H4: antes las potencias se actualizaban después del último flujo.
+        try:
+            from test_estimator import head_meter
+        except ImportError:
+            from tests.test_estimator import head_meter
+        model = feeder()
+        res = allocation.allocate(model, [head_meter(model, factor=1.1)], method='ActualKVAMethod')
+        self.assertEqual(res['status'], 'converged')
+        sol = res['solution']
+        np.testing.assert_array_equal(res['powers'], sol['powers'])
+        self.assertLess(nodal.residual(sol)['kcl_a'], 1e-6)
+        self.assertLess(res['consistency']['residual']['kcl_a'], 1e-6)
+        self.assertLess(res['consistency']['balance_relative']['Total'], 1e-9)
+        again = nodal.solve(model, powers=res['powers'])
+        self.assertLess(np.max(np.abs(again['x'][:sol['system']['n']] - sol['x'][:sol['system']['n']])), 1e-6)
 
     def test_estimator_can_start_from_allocation(self):
         model = two_loads()

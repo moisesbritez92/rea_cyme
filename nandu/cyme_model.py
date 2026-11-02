@@ -3,7 +3,7 @@
 Cada convención aplicada figura en CONVENTIONS con su evidencia. Las hipótesis no
 contrastadas con resultados de CYME se marcan como tales y se copian al informe.
 """
-from collections import defaultdict
+from collections import Counter, defaultdict
 import cmath
 import math
 
@@ -76,6 +76,13 @@ CONVENTIONS.update({
         'evidence': 'Load Allocation CYME 19 oct. 2026, CZU06: 388 potencias por fase, RMS 0,9 kVA (promedio: 6,0); '
                     'en CZU08 CYME no converge («cannot adjust KW after 60 iterations»)'},
 })
+CONVENTIONS['identity'] = {
+    'value': 'NodeId global: un nodo citado por tramos de varias redes es un único nodo (frontera); SectionId, '
+             '(DeviceType, DeviceNumber) y la fuente de cada nodo deben ser únicos entre las redes calculadas; '
+             'si se repiten, se excluyen todos los implicados',
+    'authority': 'hypothesis',
+    'evidence': 'la importación Access incorpora nodos de otra red citados por extremos de tramos (README, '
+                'Procedencia); no se conoce semántica CYME para identificadores repetidos'}
 CONTROL_MODES = {0: 'load_center', 1: 'rx', 2: 'fixed', 3: 'terminal', 4: 'fixed'}
 
 
@@ -123,6 +130,69 @@ def _line_matrices(kind, eq, phases, length_m, parallel=1):
             [[v * km * 1e-6 * parallel for v in row] for row in y])
 
 
+def _ambiguous_identities(tables, nets):
+    """Tramos y fuentes cuya identidad no es única entre las redes seleccionadas.
+
+    Los nodos son globales (CONVENTIONS['identity']): un tramo, un dispositivo o dos fuentes
+    con el mismo identificador en redes distintas no se pueden aislar sin inventar fronteras,
+    así que se excluyen todos los implicados y se reportan.
+    """
+    sections = Counter(r['SectionId'] for r in tables.get('CYMSECTION', []) if r['NetworkId'] in nets)
+    devices = Counter((r['DeviceType'], r['DeviceNumber']) for r in tables.get('CYMSECTIONDEVICE', [])
+                      if r['NetworkId'] in nets)
+    out = {'sections': {}, 'sources': {}}
+    for r in tables.get('CYMSECTION', []):
+        if r['NetworkId'] in nets and sections[r['SectionId']] > 1:
+            out['sections'][(r['NetworkId'], r['SectionId'])] = f'SectionId {r["SectionId"]} repetido entre redes'
+    for r in tables.get('CYMSECTIONDEVICE', []):
+        key = (r['DeviceType'], r['DeviceNumber'])
+        if r['NetworkId'] in nets and devices[key] > 1:
+            out['sections'].setdefault((r['NetworkId'], r['SectionId']),
+                                       f'dispositivo {r["DeviceNumber"]} (tipo {r["DeviceType"]}) en más de un tramo')
+    rows = [r for r in tables.get('CYMSOURCE', []) if r['NetworkId'] in nets]
+    numbers, nodes = Counter(r['DeviceNumber'] for r in rows), Counter(r['NodeId'] for r in rows)
+    for r in rows:
+        if numbers[r['DeviceNumber']] > 1 or nodes[r['NodeId']] > 1:
+            out['sources'][(r['NetworkId'], r['DeviceNumber'])] = \
+                f'fuente {r["DeviceNumber"]} en el nodo {r["NodeId"]}: identificador o nodo repetido'
+    return out
+
+
+def _row_power(row):
+    """kW/kvar declarados de una fila de cliente, para cuantificar lo excluido."""
+    try:
+        return {'p_kw': _num(row.get('LoadValue1'), 'LoadValue1'), 'q_kvar': _num(row.get('LoadValue2'), 'LoadValue2')}
+    except ValueError:
+        return {}
+
+
+# Incidencias que no quitan elementos del cálculo o que reproducen lo que hace CYME.
+INFO_ISSUES = {'zero_length_line_as_connection'}
+APPROXIMATION_ISSUES = {'regulator_control_not_modeled'}
+
+
+def coverage(model):
+    """Estado de cobertura del modelo, separado del estado del solver.
+
+    complete: nada excluido; cyme_equivalent_exclusions: solo exclusiones que CYME también hace;
+    approximated: hay elementos con modelo simplificado; incomplete: se excluyó algo que CYME calcula.
+    """
+    counts = Counter(i['code'] for i in model['issues'])
+    excluded = [i for i in model['issues'] if i['code'] not in INFO_ISSUES | APPROXIMATION_ISSUES]
+    real = [i for i in excluded if not i.get('cyme_equivalent')]
+    loads = [i for i in excluded if i['code'] == 'customer_load_excluded']
+    status = ('incomplete' if real else 'approximated' if counts.keys() & APPROXIMATION_ISSUES
+              else 'cyme_equivalent_exclusions' if excluded else 'complete')
+    return {'status': status, 'issue_counts': dict(counts),
+            'excluded_sections': counts.get('section_excluded', 0),
+            'excluded_sources': counts.get('source_excluded', 0),
+            'excluded_customer_rows': len(loads),
+            'excluded_load_kw': round(sum(i.get('p_kw', 0.0) for i in loads), 6),
+            'excluded_load_kvar': round(sum(i.get('q_kvar', 0.0) for i in loads), 6),
+            'excluded_load_rows_without_value': sum(1 for i in loads if 'p_kw' not in i),
+            'cyme_equivalent_exclusions': len(excluded) - len(real)}
+
+
 def build(tables, network_ids=None, include_line_charging=True):
     """Devuelve el modelo nodal y la lista de incidencias; no resuelve el flujo."""
     issues = []
@@ -157,11 +227,16 @@ def build(tables, network_ids=None, include_line_charging=True):
     for row in tables.get('CYMSECTIONDEVICE', []):
         if row['NetworkId'] in nets:
             attachments[(row['NetworkId'], row['SectionId'])].append(row)
+    ambiguous = _ambiguous_identities(tables, nets)
 
     nominal_kvll = {}
     sources = []
     for row in tables.get('CYMSOURCE', []):
         if row['NetworkId'] not in nets:
+            continue
+        reason = ambiguous['sources'].get((row['NetworkId'], row['DeviceNumber']))
+        if reason:
+            issue('source_excluded', network_id=row['NetworkId'], device_id=row['DeviceNumber'], reason=reason)
             continue
         equiv = equivalent.get(row['NodeId'], {})
         catalog = one(eq.get('CYMEQSOURCE', {}), row['EquipmentId'], row['DeviceNumber'])
@@ -177,18 +252,27 @@ def build(tables, network_ids=None, include_line_charging=True):
                                           'z0': complex(catalog['FirstLevelR0'], catalog['FirstLevelX0'])}})
 
     buses = {}
-
-    def bus(name, phases, network_id):
-        entry = buses.setdefault(name, {'phases': set(), 'network_id': network_id, 'internal': '#' in name})
-        entry['phases'].update(phases)
-        return name
-
     lines, switches, regulators, loads, capacitors, sections = [], [], [], [], [], []
     for sec in tables.get('CYMSECTION', []):
         net, sid = sec['NetworkId'], sec['SectionId']
         if net not in nets:
             continue
+        # Un tramo se valida entero en estructuras locales y solo se publica si no falla nada:
+        # una exclusión nunca deja ramas, nodos o elementos shunt incorporados a medias.
+        local = {'buses': {}, 'lines': [], 'switches': [], 'regulators': [], 'capacitors': [], 'loads': [],
+                 'issues': []}
+
+        def bus(name, phases, network_id):
+            local['buses'].setdefault(name, [network_id, set()])[1].update(phases)
+            return name
+
+        def note(code, **context):
+            local['issues'].append({'code': code, **context})
+
         try:
+            reason = ambiguous['sections'].get((net, sid))
+            if reason:
+                raise ValueError(reason)
             phases = _phases(sec['Phase'])
             devices = attachments.get((net, sid), [])
             start = bus(sec['FromNodeId'], phases, net)
@@ -209,7 +293,7 @@ def build(tables, network_ids=None, include_line_charging=True):
                         raise ValueError(f'{number}: longitud negativa')
                     if length == 0:
                         # Tramo de longitud cero: unión sin impedancia en todas sus fases.
-                        issue('zero_length_line_as_connection', network_id=net, section_id=sid, device_id=number)
+                        note('zero_length_line_as_connection', network_id=net, section_id=sid, device_id=number)
                         series['middle'].append(('switch', {'id': f'{number}#longitud0', 'table': None, 'closed': phases}))
                         continue
                     parallel = inst.get('NumberOfCableInParallel') or 1
@@ -235,7 +319,7 @@ def build(tables, network_ids=None, include_line_charging=True):
                     mode = CONTROL_MODES.get(inst['SettingOption'])
                     settings = ldc.get((net, number))
                     if mode is None or (mode != 'fixed' and settings is None):
-                        issue('regulator_control_not_modeled', device_id=number, setting_option=inst['SettingOption'],
+                        note('regulator_control_not_modeled', device_id=number, setting_option=inst['SettingOption'],
                               note='se usan los taps guardados como fijos')
                         mode = 'fixed'
                     control = None
@@ -257,7 +341,7 @@ def build(tables, network_ids=None, include_line_charging=True):
                 elif code == 17:
                     shunts.append(('capacitor', number, location))
                 else:
-                    raise ValueError(f'{number}: tipo de dispositivo {code} no modelado')
+                    raise ValueError(f'{number}: tipo de dispositivo {att.get("DeviceTypeText") or code} no modelado')
             # Cadena física del tramo: extremos, dispositivos y la línea partida si hay cargas al medio.
             chain = series['from'][:]
             mid_needed = any(loc == 'middle' for _, _, loc in shunts) or series['middle']
@@ -280,20 +364,19 @@ def build(tables, network_ids=None, include_line_charging=True):
                 nxt = end if last else bus(f'{sid}#{k}', phases, net)
                 record = {**item, 'section_id': sid, 'network_id': net, 'from': current, 'to': nxt,
                           'phases': phases}
-                {'line': lines, 'switch': switches, 'regulator': regulators}[kind].append(record)
+                {'line': local['lines'], 'switch': local['switches'], 'regulator': local['regulators']}[kind].append(record)
                 current = nxt
                 nodes.append(nxt)
             if current != end:
-                switches.append({'id': f'{sid}#enlace', 'table': None, 'closed': phases, 'section_id': sid,
-                                 'network_id': net, 'from': current, 'to': end, 'phases': phases})
-            sections.append({'id': sid, 'network_id': net, 'from': start, 'to': end, 'phases': phases,
-                             'chain': [c[1]['id'] for c in chain if c[1]]})
+                local['switches'].append({'id': f'{sid}#enlace', 'table': None, 'closed': phases, 'section_id': sid,
+                                          'network_id': net, 'from': current, 'to': end, 'phases': phases})
             for kind, number, location in shunts:
                 where = {'from': start, 'to': end, 'middle': middle}[location or 'to']
                 if kind == 'capacitor':
                     inst = one(instances['CYMSHUNTCAPACITOR'], (net, number), number)
                     if inst.get('Status') != 0 or inst.get('CapacitorControlType') not in (0, None):
-                        issue('capacitor_skipped', device_id=number, status=inst.get('Status'))
+                        note('capacitor_skipped', network_id=net, section_id=sid, device_id=number,
+                             status=inst.get('Status'))
                         continue
                     conn = CONNECTIONS.get(inst['ConnectionConfiguration'])
                     if conn is None:
@@ -301,16 +384,28 @@ def build(tables, network_ids=None, include_line_charging=True):
                     for p in phases:
                         q = _num(inst[f'KVAR{p}'], 'KVAR') * 1000
                         if q:
-                            capacitors.append({'id': f'{number}:{p}', 'device_id': number, 'bus': where,
-                                               'section_id': sid, 'connection': conn,
-                                               'phases': list(DELTA_BRANCH[p]) if conn == 'delta' else [p],
-                                               'rated_q_var': q,
-                                               'rated_v': _num(inst['KVLN'], 'KVLN') * 1000 * (math.sqrt(3) if conn == 'delta' else 1)})
+                            local['capacitors'].append({
+                                'id': f'{number}:{p}', 'device_id': number, 'bus': where, 'section_id': sid,
+                                'connection': conn, 'phases': list(DELTA_BRANCH[p]) if conn == 'delta' else [p],
+                                'rated_q_var': q,
+                                'rated_v': _num(inst['KVLN'], 'KVLN') * 1000 * (math.sqrt(3) if conn == 'delta' else 1)})
                 else:
-                    loads.append({'device_id': number, 'bus': where, 'section_id': sid, 'network_id': net,
-                                  'section_phases': phases, 'location': location})
+                    local['loads'].append({'device_id': number, 'bus': where, 'section_id': sid, 'network_id': net,
+                                           'section_phases': phases, 'location': location})
         except (ValueError, KeyError, TypeError) as exc:
             issue('section_excluded', network_id=net, section_id=sid, reason=str(exc))
+            continue
+        for name, (network_id, phases_) in local['buses'].items():
+            entry = buses.setdefault(name, {'phases': set(), 'network_id': network_id, 'internal': '#' in name})
+            entry['phases'].update(phases_)
+        lines += local['lines']
+        switches += local['switches']
+        regulators += local['regulators']
+        capacitors += local['capacitors']
+        loads += local['loads']
+        issues += local['issues']
+        sections.append({'id': sid, 'network_id': net, 'from': start, 'to': end, 'phases': phases,
+                         'chain': [c[1]['id'] for c in chain if c[1]]})
 
     # Cargas por cliente: una fila por fase o una fila ABC.
     load_devices = {(l['network_id'], l['device_id']): l for l in loads}
@@ -320,7 +415,9 @@ def build(tables, network_ids=None, include_line_charging=True):
         place = load_devices.get(key)
         if row.get('NetworkId') not in nets:
             continue
-        context = {'device_id': row.get('DeviceNumber'), 'customer': row.get('CustomerNumber')}
+        context = {'network_id': row.get('NetworkId'), 'device_id': row.get('DeviceNumber'),
+                   'customer': row.get('CustomerNumber'), **_row_power(row)}
+        row_elements = []
         try:
             if not place:
                 raise ValueError('carga sin tramo admitido')
@@ -340,6 +437,8 @@ def build(tables, network_ids=None, include_line_charging=True):
             zip_ = [_num(cls[f'Constant{k}'], k) / 100 for k in ('Impedance', 'Current', 'Power')]
             phases = _phases(row['Phase'])
             if not set(phases) <= set(place['section_phases']):
+                # CYME reporta estas cargas con 0 kVA (CONVENTIONS['abc_load_on_missing_phases']).
+                context.update(cyme_equivalent=True, convention='abc_load_on_missing_phases')
                 raise ValueError(f'fases de carga {phases} fuera del tramo {place["section_phases"]}')
             p, q = _num(row['LoadValue1'], 'LoadValue1') * 1000, _num(row['LoadValue2'], 'LoadValue2') * 1000
             share = 1 / len(phases)
@@ -347,7 +446,7 @@ def build(tables, network_ids=None, include_line_charging=True):
                 terminals = list(DELTA_BRANCH[ph]) if conn == 'delta' else [ph]
                 if not set(terminals) <= set(place['section_phases']):
                     raise ValueError(f'rama delta {terminals} fuera del tramo')
-                elements.append({'id': f'{row["DeviceNumber"]}:{row["CustomerNumber"]}:{ph}',
+                row_elements.append({'id': f'{row["DeviceNumber"]}:{row["CustomerNumber"]}:{ph}',
                                  'device_id': row['DeviceNumber'], 'customer': row['CustomerNumber'],
                                  'bus': place['bus'], 'section_id': place['section_id'],
                                  'network_id': place['network_id'], 'connection': conn, 'phases': terminals,
@@ -361,6 +460,8 @@ def build(tables, network_ids=None, include_line_charging=True):
                                  'connected_kva': row.get('ConnectedKVA'), 'kwh': row.get('KWHUsage')})
         except (ValueError, KeyError, TypeError) as exc:
             issue('customer_load_excluded', reason=str(exc), **context)
+            continue
+        elements += row_elements
 
     meters = []
     for row in tables.get('CYMNETWORKMETER', []):

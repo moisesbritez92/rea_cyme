@@ -1,17 +1,23 @@
 """Datos para la interfaz: geometría, explorador, propiedades y resultados con formato CYME."""
 from collections import defaultdict
+from datetime import datetime, timezone
+import hashlib
 import math
 from pathlib import Path
 import threading
 
-from ..storage import inspect, load_tables
+from ..storage import inspect, load_source, save
 from ..topology import DEVICES, PHASES
 from .. import cyme_model
+from . import editing
 
 ABC = 'ABC'
 DEVICE_NAMES = {1: 'Underground', 2: 'OverheadLine', 4: 'Regulator', 8: 'Breaker', 10: 'Recloser',
                 13: 'Switch', 14: 'Fuse', 17: 'ShuntCapacitor', 20: 'SpotLoad', 23: 'OverheadLineUnbalanced'}
 LOCATIONS = {0: 'Middle', 1: 'From', 2: 'To'}
+# Textos de CYME para las conexiones y modos internos del modelo (mismos nombres que DECODE).
+CONNECTION_TEXT = {'wye_grounded': 'Yg', 'delta': 'D', 'closed_delta': 'ClosedDelta'}
+TAP_MODE_TEXT = {'fixed': 'FixedTap', 'load_center': 'LoadCenter', 'rx': 'RXSettings', 'terminal': 'Terminal'}
 VOLTAGE_LIMITS = (0.95, 1.05)  # Informe CYME «Buses outside limits»: alguna fase fuera de la banda.
 EXTRA_TABLES = {'CYMNODE', 'CYMNETWORK', 'CYMDBPARAMETERS', 'CYMEQOVERHEADLINE', 'CYMEQCABLE', 'CYMEQOVERHEADLINEUNBALANCED',
                 'CYMEQREGULATOR', 'CYMEQSHUNTCAPACITOR', 'CYMEQSWITCH', 'CYMEQRECLOSER', 'CYMEQBREAKER',
@@ -38,13 +44,62 @@ def _pf(s):
     return _r(100 * abs(s.real) / abs(s), 2) if abs(s) > 1e-9 else 0.0
 
 
+def _utm_to_mercator(x, y, zone, south):
+    """Inversión WGS84 UTM y proyección esférica EPSG:3857 (metros)."""
+    a = 6378137.0
+    e2 = 0.0066943799901413165
+    ep2 = e2 / (1 - e2)
+    k0 = 0.9996
+    m = (y - (10000000 if south else 0)) / k0
+    mu = m / (a * (1 - e2 / 4 - 3 * e2 ** 2 / 64 - 5 * e2 ** 3 / 256))
+    e1 = (1 - math.sqrt(1 - e2)) / (1 + math.sqrt(1 - e2))
+    phi = (mu + (3 * e1 / 2 - 27 * e1 ** 3 / 32) * math.sin(2 * mu)
+           + (21 * e1 ** 2 / 16 - 55 * e1 ** 4 / 32) * math.sin(4 * mu)
+           + 151 * e1 ** 3 / 96 * math.sin(6 * mu) + 1097 * e1 ** 4 / 512 * math.sin(8 * mu))
+    c = ep2 * math.cos(phi) ** 2
+    t = math.tan(phi) ** 2
+    n = a / math.sqrt(1 - e2 * math.sin(phi) ** 2)
+    r = a * (1 - e2) / (1 - e2 * math.sin(phi) ** 2) ** 1.5
+    d = (x - 500000) / (n * k0)
+    lat = phi - n * math.tan(phi) / r * (d ** 2 / 2 - (5 + 3 * t + 10 * c - 4 * c ** 2 - 9 * ep2) * d ** 4 / 24
+                                          + (61 + 90 * t + 298 * c + 45 * t ** 2 - 252 * ep2 - 3 * c ** 2) * d ** 6 / 720)
+    lon = math.radians(zone * 6 - 183) + (d - (1 + 2 * t + c) * d ** 3 / 6
+                                             + (5 - 2 * c + 28 * t - 3 * c ** 2 + 8 * ep2 + 24 * t ** 2) * d ** 5 / 120) / math.cos(phi)
+    if not -math.radians(85.05112878) < lat < math.radians(85.05112878):
+        raise ValueError('Latitud fuera de la cobertura del mapa')
+    return a * lon, a * math.log(math.tan(math.pi / 4 + lat / 2))
+
+
+def _mercator_to_utm(mx, my, zone, south):
+    """Inversa de _utm_to_mercator: EPSG:3857 (metros) a WGS84 UTM, serie de Snyder."""
+    a = 6378137.0
+    e2 = 0.0066943799901413165
+    ep2 = e2 / (1 - e2)
+    k0 = 0.9996
+    lon = mx / a
+    lat = 2 * math.atan(math.exp(my / a)) - math.pi / 2
+    n = a / math.sqrt(1 - e2 * math.sin(lat) ** 2)
+    t = math.tan(lat) ** 2
+    c = ep2 * math.cos(lat) ** 2
+    aa = math.cos(lat) * (lon - math.radians(zone * 6 - 183))
+    m = a * ((1 - e2 / 4 - 3 * e2 ** 2 / 64 - 5 * e2 ** 3 / 256) * lat
+             - (3 * e2 / 8 + 3 * e2 ** 2 / 32 + 45 * e2 ** 3 / 1024) * math.sin(2 * lat)
+             + (15 * e2 ** 2 / 256 + 45 * e2 ** 3 / 1024) * math.sin(4 * lat)
+             - 35 * e2 ** 3 / 3072 * math.sin(6 * lat))
+    x = k0 * n * (aa + (1 - t + c) * aa ** 3 / 6 + (5 - 18 * t + t ** 2 + 72 * c - 58 * ep2) * aa ** 5 / 120) + 500000
+    y = k0 * (m + n * math.tan(lat) * (aa ** 2 / 2 + (5 - t + 9 * c + 4 * c ** 2) * aa ** 4 / 24
+                                       + (61 - 58 * t + t ** 2 + 600 * c - 330 * ep2) * aa ** 6 / 720))
+    return x, y + (10000000 if south else 0)
+
+
 class Project:
     """Un archivo .nandu.sqlite abierto en la interfaz, con su último resultado."""
 
     def __init__(self, path):
         self.path = Path(path).resolve(strict=True)
         self.info = inspect(self.path)
-        self.tables = load_tables(self.path, cyme_model.TABLES | EXTRA_TABLES)
+        self.schemas, self.tables = load_source(self.path)
+        self.editor = editing.Editor(self.tables)
         self.lock = threading.Lock()
         self.model = None
         self.last = None
@@ -73,7 +128,8 @@ class Project:
                  for n, r in self.nodes.items() if r.get('X') is not None and r.get('Y') is not None]
         sections = []
         for sid, sec in self.sections.items():
-            devs = [{'type': DEVICE_NAMES.get(d['DeviceType'], str(d['DeviceType'])), 'number': d['DeviceNumber'],
+            devs = [{'type': DEVICE_NAMES.get(d['DeviceType'], d.get('DeviceTypeText') or str(d['DeviceType'])),
+                     'number': d['DeviceNumber'],
                      'location': LOCATIONS.get(d['Location'], 'To'), **self._device_state(d)}
                     for d in self.devices.get(sid, [])]
             sections.append({'id': sid, 'network': sec['NetworkId'], 'from': sec['FromNodeId'], 'to': sec['ToNodeId'],
@@ -82,10 +138,25 @@ class Project:
                    for r in self.tables.get('CYMSOURCE', [])]
         xs = [n['x'] for n in nodes] or [0]
         ys = [n['y'] for n in nodes] or [0]
+        crs = next((r['ValueStr'] for r in self.tables.get('CYMDBPARAMETERS', [])
+                    if r.get('ID') == 'CoordinateSystem'), None)
+        map_bounds = None
+        if isinstance(crs, str) and crs.upper().startswith('EPSG:'):
+            try:
+                epsg = int(crs.split(':', 1)[1])
+                if 32601 <= epsg <= 32660 or 32701 <= epsg <= 32760:
+                    zone = epsg % 100
+                    projected = [_utm_to_mercator(n['x'], n['y'], zone, epsg >= 32700) for n in nodes]
+                    for n, (mx, my) in zip(nodes, projected):
+                        n['mx'], n['my'] = mx, my
+                    if projected:
+                        map_bounds = [min(p[0] for p in projected), min(p[1] for p in projected),
+                                      max(p[0] for p in projected), max(p[1] for p in projected)]
+            except (ValueError, OverflowError, TypeError):
+                pass  # CRS o posiciones no utilizables: conservar el diagrama sin fondo.
         return {'file': str(self.path), 'networks': networks, 'nodes': nodes, 'sections': sections,
-                'sources': sources, 'bounds': [min(xs), min(ys), max(xs), max(ys)],
-                'crs': next((r['ValueStr'] for r in self.tables.get('CYMDBPARAMETERS', [])
-                             if r.get('ID') == 'CoordinateSystem'), None)}
+                 'sources': sources, 'bounds': [min(xs), min(ys), max(xs), max(ys)],
+                 'crs': crs, 'map_bounds': map_bounds}
 
     def _device_state(self, attachment):
         code = attachment['DeviceType']
@@ -116,12 +187,28 @@ class Project:
                  'counts': dict(counts[net])} for net, groups in sorted(tree.items())]
 
     # --- Propiedades ----------------------------------------------------------------------
+    def _fields(self, row, table=None, labels=None, only=None):
+        """Campos [nombre, valor mostrado, edición]; la edición indica tabla, clave, valor crudo y opciones."""
+        out = []
+        key = {k: row.get(k) for k in editing.KEYS.get(table, ())}
+        for k, v in sorted(row.items()) if only is None else ((k, row.get(k)) for k in only if k in row):
+            if k in ('LastChange', 'ComponentMask', 'Flags'):
+                continue
+            shown = next(iter(v.values())) if isinstance(v, dict) else v
+            shown = DECODE[k](shown) if k in DECODE and shown is not None else shown
+            meta = None
+            if table and editing.editable(table, k) and not isinstance(v, bool):
+                meta = {'table': table, 'key': key, 'field': k, 'raw': shown if isinstance(v, dict) else v,
+                        'options': editing.options(self.tables, table, k)}
+            out.append([(labels or {}).get(k, k), shown, meta])
+        return out
+
     def properties(self, kind, ident):
         if kind == 'node':
             row = self.nodes.get(ident)
             if row is None:
                 raise KeyError(f'Nodo inexistente: {ident}')
-            out = {'title': f'Node {ident}', 'groups': [{'name': 'Information', 'fields': _fields(row)}]}
+            out = {'title': f'Node {ident}', 'groups': [{'name': 'Information', 'fields': self._fields(row, 'CYMNODE')}]}
             if self.last and ident in self.last['nodes']:
                 out['groups'].insert(0, {'name': 'Load Flow', 'fields': [
                     [f'V{p} (kVLN)', v['kv']] for p, v in self.last['nodes'][ident].items()] + [
@@ -130,7 +217,7 @@ class Project:
         sec = self.sections.get(ident)
         if sec is None:
             raise KeyError(f'Tramo inexistente: {ident}')
-        groups = [{'name': 'Section', 'fields': _fields(sec)}]
+        groups = [{'name': 'Section', 'fields': self._fields(sec, 'CYMSECTION')}]
         if self.last and ident in self.last['sections']:
             r = self.last['sections'][ident]
             groups.insert(0, {'name': 'Load Flow', 'fields': [[f'I{p} (A)', v] for p, v in r['current_a'].items()]
@@ -141,22 +228,92 @@ class Project:
             table = DEVICES.get(code, (None,))[0]
             row = self.rows.get((table, d['NetworkId'], d['DeviceNumber']), {})
             name = DEVICE_NAMES.get(code, str(code))
-            groups.append({'name': f'{name} {d["DeviceNumber"]}', 'fields': [['Location', LOCATIONS.get(d['Location'])]]
-                           + _fields(row)})
+            groups.append({'name': f'{name} {d["DeviceNumber"]}', 'device': {'type': code, 'number': d['DeviceNumber']},
+                           'fields': self._fields(d, 'CYMSECTIONDEVICE', only=['Location'])
+                           + self._fields(row, table)})
             if code in EQUIPMENT_TABLE:
                 field, eq_table = EQUIPMENT_TABLE[code]
                 eq = self.equipment.get((eq_table, row.get(field)))
                 if eq:
-                    groups.append({'name': f'Equipment {row.get(field)}', 'fields': _fields(eq), 'collapsed': True})
+                    users = sum(1 for r in self.tables.get(table, []) if r.get(field) == row.get(field))
+                    groups.append({'name': f'Equipment {row.get(field)} (catalog, {users} devices)',
+                                   'fields': self._fields(eq, eq_table), 'collapsed': True})
             if code == 20:
                 customers = [c for c in self.tables.get('CYMCUSTOMERLOAD', [])
                              if c['NetworkId'] == d['NetworkId'] and c['DeviceNumber'] == d['DeviceNumber']]
                 for c in customers:
                     groups.append({'name': f'Customer {c["CustomerNumber"]} ({PHASES.get(c["Phase"])})',
-                                   'fields': [['kW', c['LoadValue1']], ['kvar', c['LoadValue2']],
-                                              ['Customer Type', c['ConsumerClassId']],
-                                              ['Connected kVA', c['ConnectedKVA']]]})
+                                   'fields': self._fields(c, 'CYMCUSTOMERLOAD', CUSTOMER_LABELS, list(CUSTOMER_LABELS))})
         return {'title': f'Section {ident}', 'groups': groups}
+
+    # --- Edición --------------------------------------------------------------------------
+    def _map_zone(self):
+        crs = next((r['ValueStr'] for r in self.tables.get('CYMDBPARAMETERS', []) if r.get('ID') == 'CoordinateSystem'), '')
+        epsg = int(crs.split(':', 1)[1]) if isinstance(crs, str) and crs.upper().startswith('EPSG:') else 0
+        if not (32601 <= epsg <= 32660 or 32701 <= epsg <= 32760):
+            raise ValueError('El sistema de coordenadas no admite edición sobre el mapa')
+        return epsg % 100, epsg >= 32700
+
+    def _native(self, op):
+        """Las coordenadas llegan en EPSG:3857 cuando la vista tiene fondo de mapa."""
+        if op.get('map') and 'x' in op:
+            x, y = _mercator_to_utm(float(op['x']), float(op['y']), *self._map_zone())
+            op = {**op, 'x': x, 'y': y}
+        op.pop('map', None)
+        return op
+
+    def edit(self, op):
+        with self.lock:
+            entry = self.editor.apply(self._native(dict(op)))
+            self._changed()
+            return entry
+
+    def undo(self):
+        with self.lock:
+            entry = self.editor.undo()
+            self._changed()
+            return entry
+
+    def _changed(self):
+        # Un resultado calculado sobre la red anterior ya no corresponde a la red editada.
+        self.model = None
+        self.last = None
+        self._index()
+
+    def edit_state(self):
+        journal = self.editor.journal
+        return {'count': len(journal), 'last': journal[-1] if journal else None}
+
+    def catalog(self):
+        """Opciones para los diálogos de alta de tramos y equipos."""
+        lines = {code: {'name': DEVICE_NAMES[code], 'equipment': [k for k, _ in editing.options(self.tables, table, field)]}
+                 for code, (table, field, _) in editing.LINE_TYPES.items()}
+        devices = {}
+        for code, name in editing.ADDABLE.items():
+            table = DEVICES[code][0]
+            ref = (table, 'EquipmentId')
+            devices[code] = {'name': name, 'available': bool(self.tables.get(table)),
+                             'equipment': [k for k, _ in editing.options(self.tables, *ref)] if ref in editing.REFERENCES else []}
+        return {'lines': lines, 'devices': devices, 'phases': editing.ENUMS['Phase'],
+                'locations': editing.ENUMS['Location'], 'networks': [r['NetworkId'] for r in self.tables.get('CYMNETWORK', [])]}
+
+    def save_as(self, output):
+        """Publicar la red editada como proyecto nuevo; el original no se modifica."""
+        from ..model import build_model, validate
+        with self.lock:
+            if not self.editor.journal:
+                raise ValueError('No hay cambios que guardar')
+            digest = hashlib.sha256(self.path.read_bytes()).hexdigest()
+            provenance = {'derived_from': {'file': str(self.path), 'sha256': digest,
+                                           'provenance': self.info['provenance']},
+                          'edits': self.editor.journal, 'created_at': datetime.now(timezone.utc).isoformat(),
+                          'excluded_tables': self.info['provenance'].get('excluded_tables', [])}
+            schemas = {name: self.schemas.get(name) or {'columns': [{'name': k} for k in (rows[0] if rows else {})],
+                                                        'scope': 'edited'}
+                       for name, rows in self.tables.items()}
+            model = build_model(self.tables)
+            save(output, provenance, schemas, self.tables, model, validate(model))
+        return str(Path(output).resolve())
 
     # --- Cálculos -------------------------------------------------------------------------
     def _model(self):
@@ -243,13 +400,21 @@ class Project:
                 if aux is None:
                     continue
                 cur, s, loss, rating = {p: abs(i) for p, i in aux.items()}, 0j, 0j, 0
+            # Utilización por fase; el máximo del equipo se informa aparte. La capacidad del catálogo es
+            # una sola por conductor de fase (cyme_model), no hay capacidades distintas por fase.
+            phase_loading = {p: _r(100 * v / rating, 1) for p, v in cur.items()} if rating else {}
             out['sections'][sec['id']] = {
                 'current_a': {p: _r(v, 2) for p, v in cur.items()},
-                'loading_pct': _r(100 * max(cur.values()) / rating, 1) if rating and cur else None,
-                'p_kw': _r(abs(s.real) / 1000, 2), 'q_kvar': _r(s.imag / 1000 * (1 if s.real >= 0 else -1), 2),
+                'loading_pct': max(phase_loading.values()) if phase_loading else None,
+                'loading_pct_phase': phase_loading,
+                # Signo conservado: positivo en el sentido From -> To del tramo.
+                'p_kw': _r(s.real / 1000, 2), 'q_kvar': _r(s.imag / 1000, 2),
                 'loss_kw': _r(loss.real / 1000, 3)}
         out['summary'] = _summary(model, res)
         out['abnormal'] = _abnormal(out)
+        out['regulators'] = _regulators(sol.get('model') or model, sol, res)
+        out['capacitors'] = _capacitors(model, res)
+        out['profile'] = _profile(model, out)
         return out
 
 
@@ -261,19 +426,11 @@ DECODE = {
     'SettingOption': lambda v: {0: 'LoadCenter', 1: 'RXSettings', 2: 'FixedTap', 3: 'Terminal',
                                 4: 'FixedTapPrimary', 5: 'PythonScript'}.get(v, v),
     'LoadValueType': lambda v: {0: 'KW_KVAR'}.get(v, v),
-    'DeviceType': lambda v: DEVICE_NAMES.get(v, v),
+    'DeviceType': lambda v: DEVICE_NAMES.get(v, v), 'Location': lambda v: LOCATIONS.get(v, v),
 }
-
-
-def _fields(row):
-    out = []
-    for k, v in sorted(row.items()):
-        if k in ('LastChange', 'ComponentMask', 'Flags'):
-            continue
-        if isinstance(v, dict):
-            v = next(iter(v.values()))
-        out.append([k, DECODE[k](v) if k in DECODE and v is not None else v])
-    return out
+CUSTOMER_LABELS = {'LoadValue1': 'kW', 'LoadValue2': 'kvar', 'Phase': 'Phase', 'ConsumerClassId': 'Customer Type',
+                   'ConnectedKVA': 'Connected kVA', 'KWHUsage': 'kWh', 'LockDuringLoadAllocation': 'Locked',
+                   'Status': 'Status'}
 
 
 def _messages(model, sol):
@@ -335,6 +492,102 @@ def _summary(model, res):
     return rows
 
 
+def _bus_voltage(res, bus, p):
+    d = res['voltages'].get(bus, {}).get(p)
+    return None if d is None or d.get('deenergized') else d
+
+
+def _regulators(model, sol, res):
+    """Informe «Regulators» por fase: tap final, tensiones de entrada y salida, corriente y control.
+
+    Entrada y salida son las que orientó el motor (`input_bus`/`output_bus`), no el sentido del tramo.
+    La corriente auxiliar es la del lado de salida; la de entrada es Mᵀ·I_salida (transformador ideal).
+    CYME informa la de entrada (contraste del 27 oct. 2026: I_CYME/I_salida = Vout/Vin).
+    """
+    from .. import nodal  # solo al calcular
+    rows = []
+    infos = sol.get('system', {}).get('regulators', {})
+    for reg in model['regulators']:
+        info = infos.get(reg['id'])
+        control = nodal.control_voltages(sol, reg) if info and 'net' in sol else {}
+        current = res['aux'].get(('regulator', reg['id']), {})
+        current_in = {}
+        if info and len(current) == len(reg['phases']):
+            out_vec = [current[p] for p in reg['phases']]
+            current_in = {p: sum(info['M'][i, j] * out_vec[i] for i in range(len(out_vec)))
+                          for j, p in enumerate(reg['phases'])}
+        bus_in, bus_out = (info['input_bus'], info['output_bus']) if info else (reg['from'], reg['to'])
+        ctrl = reg.get('control') or {}
+        for p in reg['phases']:
+            v_in, v_out = _bus_voltage(res, bus_in, p), _bus_voltage(res, bus_out, p)
+            rows.append({'id': reg['id'], 'section_id': reg['section_id'], 'network': reg['network_id'],
+                         'equipment': reg.get('equipment_id'),
+                         'connection': CONNECTION_TEXT.get(reg['connection'], reg['connection']),
+                         'mode': TAP_MODE_TEXT.get(ctrl.get('mode', 'fixed'), ctrl.get('mode')),
+                         'phase': p, 'tap': reg['taps'].get(p), 'max_tap': reg['max_tap'],
+                         'v_in_kv': _r(abs(v_in['v']) / 1000, 4) if v_in else None,
+                         'v_out_kv': _r(abs(v_out['v']) / 1000, 4) if v_out else None,
+                         'v_out_pct': _r(100 * v_out['pu'], 2) if v_out else None,
+                         'i_a': _r(abs(current_in[p]), 2) if p in current_in else None,
+                         'i_out_a': _r(abs(current[p]), 2) if p in current else None,
+                         'input_node': bus_in, 'output_node': bus_out,
+                         'control_v': _r(control[p], 2) if p in control else None,
+                         'set_v': ctrl.get('set_v', {}).get(p), 'bandwidth_v': ctrl.get('bandwidth_v', {}).get(p)})
+    return rows
+
+
+def _capacitors(model, res):
+    """Informe «Shunt Capacitors»: kvar nominal y entregado a la tensión calculada (Q·|V|²/Vn²)."""
+    rows = []
+    for cap in model['capacitors']:
+        vals = [_bus_voltage(res, cap['bus'], p) for p in cap['phases']]
+        v = None if None in vals else abs(vals[0]['v'] - (vals[1]['v'] if len(vals) == 2 else 0))
+        rows.append({'id': cap['device_id'], 'section_id': cap['section_id'],
+                     'network': model['buses'][cap['bus']]['network_id'], 'node': cap['bus'],
+                     'connection': CONNECTION_TEXT.get(cap['connection'], cap['connection']), 'phase': ''.join(cap['phases']),
+                     'rated_kvar': _r(cap['rated_q_var'] / 1000, 2), 'rated_kv': _r(cap['rated_v'] / 1000, 3),
+                     'v_kv': _r(v / 1000, 4) if v is not None else None,
+                     'v_pct': _r(100 * v / cap['rated_v'], 2) if v is not None else None,
+                     'kvar': _r(cap['rated_q_var'] * v ** 2 / cap['rated_v'] ** 2 / 1000, 2) if v is not None else None,
+                     # «Loading» de CYME para capacitores = kvar entregados / nominales (contraste 27 oct. 2026).
+                     'loading_pct': _r(100 * v ** 2 / cap['rated_v'] ** 2, 1) if v is not None else None})
+    return rows
+
+
+def _profile(model, out):
+    """Distancia eléctrica a la fuente por nodo (suma de longitudes de línea, Dijkstra desde las fuentes).
+
+    Solo recorre tramos con resultado y sin maniobras abiertas en todas sus fases, para no cruzar
+    enlaces normalmente abiertos. `parent` permite trazar el camino fuente → nodo del perfil.
+    """
+    import heapq
+    # Las mitades '#1'/'#2' de una línea partida por cargas al medio conservan la longitud completa.
+    pieces = {}
+    for line in model['lines']:
+        pieces[(line['section_id'], line['id'].split('#')[0])] = line.get('length_m') or 0.0
+    length = defaultdict(float)
+    for (sid, _), meters in pieces.items():
+        length[sid] += meters
+    open_sections = {s['section_id'] for s in model['switches'] if not s['closed']}
+    adj = defaultdict(list)
+    for sec in model['sections']:
+        if sec['id'] in out['sections'] and sec['id'] not in open_sections:
+            adj[sec['from']].append((sec['to'], sec['id']))
+            adj[sec['to']].append((sec['from'], sec['id']))
+    best = {}
+    heap = [(0.0, src['bus'], None, None) for src in model['sources']]
+    heapq.heapify(heap)
+    while heap:
+        dist, node, parent, sid = heapq.heappop(heap)
+        if node in best:
+            continue
+        best[node] = {'distance_m': _r(dist, 1), 'parent': parent, 'section': sid}
+        for nxt, sec_id in adj[node]:
+            if nxt not in best:
+                heapq.heappush(heap, (dist + length[sec_id], nxt, node, sec_id))
+    return {node: d for node, d in best.items() if node in out['nodes']}
+
+
 def _abnormal(out):
     lo, hi = VOLTAGE_LIMITS
     rows = []
@@ -347,8 +600,9 @@ def _abnormal(out):
     for p in ABC:
         hits = []
         for sid, r in out['sections'].items():
-            if r['loading_pct'] is not None and p in r['current_a'] and r['loading_pct'] > 100:
-                hits.append((r['loading_pct'], sid))
+            value = r.get('loading_pct_phase', {}).get(p)
+            if value is not None and value > 100:
+                hits.append((value, sid))
         worst = max(hits) if hits else None
         rows.append({'condition': 'Overload', 'phase': p, 'count': len(hits), 'worst': worst[1] if worst else '',
                      'value': worst[0] if worst else None})

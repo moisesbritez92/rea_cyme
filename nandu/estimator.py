@@ -10,9 +10,15 @@ Reproduce la formulación documentada en la ayuda de CYME (StateEstimator.chm):
 
 Estado x: tensiones de terminales, corrientes auxiliares del modelo nodal y potencia
 (kW, kvar) de cada carga. c(x) son las ecuaciones nodales de nodal.py. Las cargas
-son pseudomedidas; los medidores aportan |I| y factor de potencia. La precisión
-declarada equivale a 3 desviaciones estándar. Durante la estimación las cargas son
-de potencia constante; el modelo de sensibilidad se aplica después (ayuda CYME).
+son pseudomedidas con σ = precisión × valor (load_precision_is_sigma). Un medidor
+A-FP entra por defecto como |I|, P y Q (meter_model='amp_pq', ajustado a CYME), con
+σ = precisión × valor / 3 y un piso relativo a la potencia aparente medida para que
+FP = 100 % (Q = 0) no deje σ nula. Durante la estimación las cargas son de potencia
+constante; el modelo de sensibilidad se aplica después (ayuda CYME).
+
+Los índices de calidad (χ², residuos normalizados) tratan |I|, P y Q como medidas
+independientes aunque derivan del mismo par A-FP: son orientativos, no una prueba
+estadística calibrada (ver quality_indices['calibration']).
 """
 import math
 
@@ -34,6 +40,12 @@ DEFAULTS = {'kw_load_precision': 50.0, 'kvar_load_precision': 50.0, 'amp_meter_p
             # o 'amp_pq' (|I|, P y Q). 'amp_pq' con load_precision_is_sigma reproduce el estimador de
             # CYME en CZU06 (325 cargas, RMS 0,23 kW / 0,03 kvar; docs/cyme-ingenieria-inversa.md).
             'meter_model': 'amp_pq', 'kw_meter_precision': 3.0, 'kvar_meter_precision': 3.0,
+            # Piso de σ de P y Q del medidor, en % de la potencia aparente medida (1σ). Evita σ = 0 con
+            # FP = 100 % (Q = 0). Hipótesis de ingeniería: no se conoce el tratamiento de CYME. En CZU06/08
+            # (FP de cabecera < 99 %) σ relativa de Q es mayor que el piso y el resultado no cambia.
+            'meter_sigma_floor_pct_of_s': 0.1,
+            # Factibilidad final: ecuaciones nodales con las potencias estimadas (A).
+            'feasibility_tolerance_a': 1e-6,
             # Una variable por fase (CYME escribe la suma en las filas ABC) y precisión de carga = σ.
             'group_customer_rows': False, 'load_precision_is_sigma': True,
             # Cargas bloqueadas (LockDuringLoadAllocation): CYME no las modifica en el estimador.
@@ -119,6 +131,18 @@ def _meter_terms(z, where, size, kind='all'):
             'kvar': (q / 1000, {k: v / 1000 for k, v in dq.items()})}
 
 
+def _check_meter(ident, phase, amps, pf_pct):
+    """Rechaza con diagnóstico las lecturas que harían singular el problema."""
+    for name, value in (('corriente', amps), ('FP', pf_pct)):
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise ValueError(f'{ident} fase {phase}: {name} no numérica o no finita')
+    if amps <= 0:
+        raise ValueError(f'{ident} fase {phase}: corriente {amps} A no admitida (debe ser > 0); '
+                         'una fase sin corriente medida no se puede usar como medidor A-FP')
+    if not 0 < abs(pf_pct) <= 100:
+        raise ValueError(f'{ident} fase {phase}: factor de potencia {pf_pct} % fuera de (0, 100]')
+
+
 def estimate(model, meters=None, options=None):
     opt = {**DEFAULTS, **(options or {})}
     flow = nodal.solve(model)
@@ -173,18 +197,23 @@ def estimate(model, meters=None, options=None):
         raise ValueError(f'meter_model no admitido: {model_}')
     for m, where in located:
         for p, (amps, pf_pct) in m['phases'].items():
+            _check_meter(m['id'], p, amps, pf_pct)
             if model_ in ('amp_pf', 'amp_pq'):
                 meas.append(('amp', m['id'], p, where[p], amps, opt['amp_meter_precision'] / 100 * amps / 3))
             if model_ == 'amp_pf':
                 meas.append(('pf', m['id'], p, where[p], pf_pct / 100,
-                             opt['pf_meter_precision'] / 100 * pf_pct / 100 / 3))
+                             opt['pf_meter_precision'] / 100 * abs(pf_pct) / 100 / 3))
             else:
                 # P y Q de la medida con la tensión del punto de medición (fuente: fija).
                 pf = pf_pct / 100
                 s_kva = abs(x_c[where[p][1]]) * amps / 1000
                 kw, kvar = s_kva * abs(pf), s_kva * math.sqrt(max(0.0, 1 - pf * pf)) * (1 if pf > 0 else -1)
-                meas.append(('kw', m['id'], p, where[p], kw, opt['kw_meter_precision'] / 100 * abs(kw) / 3))
-                meas.append(('kvar', m['id'], p, where[p], kvar, opt['kvar_meter_precision'] / 100 * abs(kvar) / 3))
+                floor = opt['meter_sigma_floor_pct_of_s'] / 100 * s_kva
+                meas.append(('kw', m['id'], p, where[p], kw, max(opt['kw_meter_precision'] / 100 * abs(kw) / 3, floor)))
+                meas.append(('kvar', m['id'], p, where[p], kvar,
+                             max(opt['kvar_meter_precision'] / 100 * abs(kvar) / 3, floor)))
+    if any(not sigma > 0 for *_, sigma in meas):
+        raise ValueError('medida con incertidumbre nula: revisar precisiones y meter_sigma_floor_pct_of_s')
     q = 2 * L + len(meas)
     Ar, Ai = A.real.tocsr(), A.imag.tocsr()
     J_lin = sp.bmat([[Ar, -Ai], [Ai, Ar]], format='csr')
@@ -246,6 +275,11 @@ def estimate(model, meters=None, options=None):
             break
     # Posproceso: medidas estimadas y potencia nominal por modelo ZIP.
     flow_out = {**flow, 'x': x_c, 'loads': prepared, 'powers': s_k * 1000}
+    # El criterio de paso no basta: el estado publicado debe cumplir las ecuaciones de red.
+    feasibility = nodal.residual(flow_out)
+    flow_out['final_residual'] = feasibility
+    if status == 'converged' and feasibility['kcl_a'] > opt['feasibility_tolerance_a']:
+        status = 'not_converged_infeasible'
     res = nodal.results(flow_out)
     residuals = []
     names = {'amp': 'current_a', 'pf': 'power_factor', 'kw': 'active_power_kw', 'kvar': 'reactive_power_kvar'}
@@ -287,8 +321,14 @@ def estimate(model, meters=None, options=None):
             'erroneous_measurements': int(np.sum(rn > lvl2)),
             'largest_load_residuals': [{'load': names[i][0], 'quantity': names[i][1], 'normalized_residual': float(rn[i])}
                                        for i in worst],
-            'note': 'r_N = |r| / sqrt(diag(R E11 R)); E11 del sistema de Hachtel en la última iteración'}
+            'note': 'r_N = |r| / sqrt(diag(R E11 R)); E11 del sistema de Hachtel en la última iteración',
+            'calibration': ('modo de compatibilidad CYME: |I|, P y Q de un mismo par A-FP se ponderan como '
+                            'independientes y los grados de libertad se cuentan por ecuaciones, sin verificar '
+                            'rango; el umbral chi-cuadrado y la clasificación de residuos son orientativos'
+                            if opt['meter_model'] == 'amp_pq' else
+                            'grados de libertad contados por ecuaciones, sin verificar rango; orientativo')}
     return {'status': status, 'iterations': history, 'solution_cost': cost, 'quality_indices': quality,
+            'final_residual': feasibility,
             'measurements': len(meas) + 2 * L,
             'state_variables': nstate, 'constraints': 2 * size, 'meter_residuals': residuals,
             'loads': load_rows, 'results': res, 'flow': flow_out, 'options': opt,

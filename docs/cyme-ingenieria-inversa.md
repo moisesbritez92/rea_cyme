@@ -134,6 +134,22 @@ equivalentes a `CYMLDCSETTINGS` con Forward 1/0 en Access.
   el informe «Load Flow - Loads». Las filas ABC quedan equilibradas con la asignación de menor
   módulo (RMS 0,9 kVA en CZU06). CZU08: CYME no converge en 60 iteraciones.
 
+## Informes de resultados (contraste del 27 oct. 2026)
+
+Corrida `nandu-reports-czu-20261027-01`, CZU06/CZU08 desde la base, tolerancia por defecto.
+
+- **Regulador, corriente:** `IA/IB/IC` de `cyme_regulator_inventory` es la corriente del lado de
+  entrada (fuente). Su cociente con la corriente de salida es Vout/Vin, y coincide con Mᵀ·I_salida
+  del motor en ≤ 0,4 A. `VLNxinput`/`VLNx` siguen la orientación eléctrica, no el sentido del tramo.
+- **Capacitor, «Loading (%)»** (informes Abnormal conditions y Detailed) = Q entregada / Q nominal
+  = (V/Vn)² por fase, no V/Vn. En 9 de 9 fases la diferencia con Ñandu es ≤ 0,3 puntos (0,56 kvar).
+  La hipótesis de corriente fallaría por 3 a 10 puntos. El informe «Shunt Capacitors and Reactors»
+  da en «Total Cap. kvar» el valor nominal.
+- **Capacitor, «From Node»** del informe es el nodo From del tramo, no el de conexión
+  (BC_100KVAR_3 tiene `Location` = To).
+- **Nodo, `Distance`** (km): suma de longitudes desde la fuente. Coincide en ≤ 0,05 m en 1.304
+  nodos; los nodos sin energía dan 0.
+
 ## Pendiente de contraste con CYME en vivo
 
 Resueltos el 19 oct. 2026 con la corrida `nandu-ref-lf-20261019-01` (ver README):

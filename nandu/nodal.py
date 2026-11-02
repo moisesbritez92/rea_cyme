@@ -193,16 +193,19 @@ def assemble(net):
             'skipped': {k: v for k, v in skipped.items()}}
 
 
-def prepare_loads(net, loads=None):
-    """Vectoriza cargas: terminal(es), potencia nominal, ZIP y base de tensión."""
+def prepare_loads(net, loads=None, skipped=None):
+    """Vectoriza cargas: terminal(es), potencia nominal, ZIP y base de tensión.
+
+    Las cargas sin energía o sin tensión nominal se anotan en skipped (lista de ids).
+    """
     m = net.model
     out = []
     for load in (loads if loads is not None else m['loads']):
         idx = [net.pos.get((load['bus'], p)) for p in load['phases']]
-        if None in idx:
-            continue
         base = _base_ln(m, load['bus'])
-        if base is None:
+        if None in idx or base is None:
+            if skipped is not None:
+                skipped.append(load['id'])
             continue
         if load['connection'] == 'delta':
             base *= SQRT3
@@ -256,13 +259,45 @@ def add_load_currents(F, prepared, currents):
     return F
 
 
-def solve(model, tolerance=1e-9, max_iterations=40, prepared_loads=None, powers=None, initial=None):
+def residual(sol):
+    """Residuo de las ecuaciones ensambladas en el estado publicado (x, cargas y potencias de sol).
+
+    kcl_a: corriente no balanceada en los terminales; constraint_v: incumplimiento de las
+    restricciones de tensión de fuentes, maniobras y reguladores.
+    """
+    sys_, n = sol['system'], sol['system']['n']
+    F = add_load_currents(sys_['A'] @ sol['x'] - sys_['b'], sol['loads'],
+                          load_currents(sol['x'], sol['loads'], sol['powers']))
+    return {'kcl_a': float(np.max(np.abs(F[:n]))) if n else 0.0,
+            'constraint_v': float(np.max(np.abs(F[n:]))) if len(F) > n else 0.0}
+
+
+def solve(model, tolerance=1e-9, max_iterations=40, prepared_loads=None, powers=None, initial=None,
+          current_tolerance_a=1e-6, voltage_tolerance_v=1e-6):
+    """Newton sobre el sistema nodal aumentado.
+
+    Converge cuando el último paso cumple max|dV| < tolerance (pu) y, reevaluadas las
+    ecuaciones en el estado final, la corriente no balanceada (A) y el incumplimiento de las
+    restricciones de tensión (V) quedan bajo sus tolerancias, que tienen unidades distintas.
+    """
     net = Network(model)
     sys_ = assemble(net)
     A, b, n = sys_['A'], sys_['b'], sys_['n']
     size = A.shape[0]
-    loads = prepared_loads if prepared_loads is not None else prepare_loads(net)
+    if prepared_loads is None:
+        skipped = []
+        loads = prepare_loads(net, skipped=skipped)
+        if skipped:
+            sys_['skipped']['loads'] = skipped
+    else:
+        loads = prepared_loads
+    if powers is not None:
+        powers = np.array(powers, dtype=complex)  # copia: la solución no cambia si el llamador edita su arreglo
     bases = np.array([_base_ln(model, bus) or 1.0 for bus, _ in net.live])
+    if n == 0:
+        return {'status': 'no_energized_terminals', 'iterations': [], 'x': np.zeros(size, dtype=complex),
+                'net': net, 'system': sys_, 'loads': loads, 'powers': powers, 'bases': bases,
+                'final_residual': None}
     angle = {'A': 0, 'B': -2 * math.pi / 3, 'C': 2 * math.pi / 3}
     x = np.zeros(size, dtype=complex)
     if initial is not None:
@@ -274,10 +309,17 @@ def solve(model, tolerance=1e-9, max_iterations=40, prepared_loads=None, powers=
             x[info['outputs']] = info['M'] @ x[info['inputs']]
     Ar, Ai = A.real.tocsr(), A.imag.tocsr()
     J_lin = sp.bmat([[Ar, -Ai], [Ai, Ar]], format='csr')
-    history, status = [], 'not_converged'
-    for it in range(1, max_iterations + 1):
+    history, status, final = [], 'not_converged', None
+    dv = math.inf
+    for it in range(1, max_iterations + 2):
         currents = load_currents(x, loads, powers)
         F = add_load_currents(A @ x - b, loads, currents)
+        final = {'kcl_a': float(np.max(np.abs(F[:n]))), 'constraint_v': float(np.max(np.abs(F[n:]))) if size > n else 0.0}
+        if dv < tolerance and final['kcl_a'] <= current_tolerance_a and final['constraint_v'] <= voltage_tolerance_v:
+            status = 'converged'
+            break
+        if it > max_iterations:
+            break
         rows, cols, vals = load_jacobian(loads, currents, size)
         J = J_lin + sp.csr_matrix((vals, (rows, cols)), shape=(2 * size, 2 * size))
         R = np.concatenate([F.real, F.imag])
@@ -291,14 +333,10 @@ def solve(model, tolerance=1e-9, max_iterations=40, prepared_loads=None, powers=
             break
         step = dx[:size] + 1j * dx[size:]
         x += step
-        dv = float(np.max(np.abs(step[:n]) / bases)) if n else 0.0
-        mismatch = float(np.max(np.abs(F[:n]))) if n else 0.0
-        history.append({'iteration': it, 'max_dv_pu': dv, 'max_current_mismatch_a': mismatch})
-        if dv < tolerance:
-            status = 'converged'
-            break
+        dv = float(np.max(np.abs(step[:n]) / bases))
+        history.append({'iteration': it, 'max_dv_pu': dv, 'max_current_mismatch_a': final['kcl_a']})
     return {'status': status, 'iterations': history, 'x': x, 'net': net, 'system': sys_, 'loads': loads,
-            'powers': powers, 'bases': bases}
+            'powers': powers, 'bases': bases, 'final_residual': final}
 
 
 CONTROL_BASE_V = 120.0  # BaseVoltageCustomerSide del estudio CYME
@@ -409,8 +447,35 @@ def results(sol):
     total_load = defaultdict(complex)
     for item in load_out:
         total_load[item['network_id']] += item['s']
+    caps = defaultdict(complex)
+    for cap in model['capacitors']:
+        idx = [net.pos.get((cap['bus'], p)) for p in cap['phases']]
+        if None in idx:
+            continue
+        v = V[idx[0]] - (V[idx[1]] if len(idx) == 2 else 0)
+        # Potencia absorbida: conj(Y)|V|^2 con Y = jQ/V^2 (negativa = entrega reactiva).
+        caps[model['buses'][cap['bus']]['network_id']] += -1j * cap['rated_q_var'] * abs(v) ** 2 / cap['rated_v'] ** 2
     return {'voltages': voltages, 'branches': branches, 'line_losses': dict(losses), 'aux': aux,
-            'sources': sources, 'loads': load_out, 'load_totals': dict(total_load)}
+            'sources': sources, 'loads': load_out, 'load_totals': dict(total_load),
+            'capacitor_totals': dict(caps), 'balance': _balance(model, sources, total_load, losses, caps)}
+
+
+def _balance(model, sources, loads, losses, caps):
+    """Fuente - cargas - pérdidas de línea - capacitores por red; debe ser ~0 en un estado consistente.
+
+    Es una verificación de conservación, no una medida independiente: comparte el modelo con
+    el cálculo. Con maniobras o reguladores entre redes distintas el balance por red no aplica,
+    pero el total sí.
+    """
+    out = {}
+    for net in list(model['networks']) + ['Total']:
+        pick = (lambda d: sum(d.values(), 0j)) if net == 'Total' else (lambda d: d.get(net, 0j))
+        src = sum((sum(s['power'].values(), 0j) for s in sources.values()
+                   if net == 'Total' or s['network_id'] == net), 0j)
+        res = src - pick(loads) - pick(losses) - pick(caps)
+        out[net] = {'source': src, 'residual': res,
+                    'relative': abs(res) / abs(src) if abs(src) > 0 else 0.0}
+    return out
 
 
 def device_current(res, kind, ident):
