@@ -17,12 +17,22 @@ def _kw(value):
     return {'kw': round(value.real / 1000, 6), 'kvar': round(value.imag / 1000, 6)}
 
 
-def build_model(path, networks=None, include_line_charging=True):
+METER_OVERRIDE_NOTE = ('Lecturas de medidor distintas de la base importada: el resultado no es comparable '
+                       'con una corrida de CYME sobre la base sin cambios')
+
+
+def build_model(path, networks=None, include_line_charging=True, meter_overrides=None):
+    """Modelo de una importación; `meter_overrides` (parse_meter_override) reemplaza lecturas A-FP."""
     tables = load_tables(path, cyme_model.TABLES)
     unknown = set(networks or []) - {r['NetworkId'] for r in tables.get('CYMNETWORK', [])}
     if unknown:
         raise ValueError(f'Redes ausentes en la importación: {sorted(unknown)}')
-    return cyme_model.build(tables, networks, include_line_charging)
+    changes = []
+    if meter_overrides:
+        tables, changes = cyme_model.override_meters(tables, meter_overrides, networks)
+    model = cyme_model.build(tables, networks, include_line_charging)
+    model['meter_overrides'] = changes
+    return model
 
 
 def _summary(model, res):
@@ -78,12 +88,16 @@ def _details(model, sol, res):
 
 def _header(path, model, kind):
     provenance = inspect(path)['provenance']
-    return {'report_format': f'nandu-{kind}-v1', 'nandu_version': __version__, 'source_file': str(Path(path)),
-            'source_sha256': provenance.get('source_sha256'), 'networks': model['networks'],
-            'conventions': model['conventions'], 'model_issues': model['issues'],
-            'model_coverage': cyme_model.coverage(model),
-            'model_counts': {k: len(model[k]) for k in ('buses', 'lines', 'switches', 'regulators', 'loads',
-                                                         'capacitors', 'sources')}}
+    header = {'report_format': f'nandu-{kind}-v1', 'nandu_version': __version__, 'source_file': str(Path(path)),
+              'source_sha256': provenance.get('source_sha256'), 'networks': model['networks'],
+              'conventions': model['conventions'], 'model_issues': model['issues'],
+              'model_coverage': cyme_model.coverage(model),
+              'model_counts': {k: len(model[k]) for k in ('buses', 'lines', 'switches', 'regulators', 'loads',
+                                                           'capacitors', 'sources')}}
+    if model.get('meter_overrides'):
+        header['meter_overrides'] = model['meter_overrides']
+        header['meter_overrides_note'] = METER_OVERRIDE_NOTE
+    return header
 
 
 def load_flow(path, networks=None, details=False, include_line_charging=True):
@@ -102,8 +116,8 @@ def load_flow(path, networks=None, details=False, include_line_charging=True):
     return report
 
 
-def estimate(path, networks=None, details=False, options=None):
-    model = build_model(path, networks)
+def estimate(path, networks=None, details=False, options=None, meter_overrides=None):
+    model = build_model(path, networks, meter_overrides=meter_overrides)
     est = estimator.estimate(model, options=options)
     report = {**_header(path, model, 'state-estimation'),
               'engine': 'nandu.estimator: WLS con restricciones (Hachtel)', 'status': est['status'],
@@ -131,9 +145,9 @@ def estimate(path, networks=None, details=False, options=None):
     return report
 
 
-def allocate(path, networks=None, details=False, method='KVAMethod'):
+def allocate(path, networks=None, details=False, method='KVAMethod', meter_overrides=None):
     from .allocation import allocate as run
-    model = build_model(path, networks)
+    model = build_model(path, networks, meter_overrides=meter_overrides)
     alloc = run(model, estimator.meters_from_model(model, None), method)
     report = {**_header(path, model, 'load-allocation'), 'engine': 'nandu.allocation: método CYME + flujo de carga',
               'status': alloc['status'], 'method': method, 'iterations': alloc['iterations'],

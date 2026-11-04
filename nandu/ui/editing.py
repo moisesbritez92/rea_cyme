@@ -9,6 +9,7 @@ from decimal import Decimal, InvalidOperation
 import math
 import re
 
+from ..cyme_model import METER_AMP_PF, METER_FIELDS, check_meter_reading
 from ..topology import DEVICES, PHASES
 
 LINE_TYPES = {1: ('CYMUNDERGROUNDLINE', 'CableId', 'CYMEQCABLE'),
@@ -41,12 +42,14 @@ INSTANCE_TABLES = {table for table, _ in DEVICES.values()}
 CATALOG_TABLES = {catalog for catalog, _ in REFERENCES.values()}
 KEYS = {'CYMSECTION': ('SectionId',), 'CYMNODE': ('NodeId',), 'CYMSECTIONDEVICE': ('SectionId', 'DeviceType', 'DeviceNumber'),
         'CYMCUSTOMERLOAD': ('NetworkId', 'DeviceNumber', 'CustomerNumber'),
+        'CYMNETWORKMETER': ('NetworkId', 'NodeId'),
         **{t: ('NetworkId', 'DeviceNumber') for t in INSTANCE_TABLES},
         **{t: ('ConsumerClassId' if t == 'CYMCONSUMERCLASS' else 'EquipmentId',) for t in CATALOG_TABLES}}
 # Identidad y conectividad no se cambian con «set»: tienen operaciones propias.
 LOCKED = {'NetworkId', 'SectionId', 'NodeId', 'DeviceNumber', 'DeviceType', 'CustomerNumber', 'FromNodeId',
           'ToNodeId', 'ComponentMask', 'Flags', 'LastChange', 'FromNodeConnectorIndex', 'ToNodeConnectorIndex'}
 NAME = re.compile(r'^[^\s\\/"\'<>]{1,64}$')
+METER_EDITABLE = {f for fields in METER_FIELDS.values() for f in fields}
 
 
 class EditError(ValueError):
@@ -56,6 +59,9 @@ class EditError(ValueError):
 def editable(table, field):
     if table == 'CYMSECTIONDEVICE':
         return field == 'Location'
+    if table == 'CYMNETWORKMETER':
+        # Solo las lecturas A-FP que usan el estimador y Load Allocation; el resto no se modela.
+        return field in METER_EDITABLE
     if field in KEYS.get(table, ()):
         return False
     return table in KEYS and field not in LOCKED
@@ -197,6 +203,19 @@ class Editor:
         if allowed and table not in CATALOG_TABLES and value is not None and value not in {k for k, _ in allowed}:
             raise EditError(f'Código no admitido para {field}: {value!r}')
 
+    def _check_meter(self, row):
+        """La fila resultante debe seguir siendo una lectura A-FP que el cálculo admite."""
+        if row.get('DemandType') != METER_AMP_PF or row.get('IsTotalDemand'):
+            raise EditError(f'Medidor de {row.get("NetworkId")}: DemandType {row.get("DemandType")} no editable '
+                            '(solo A-FP por fase)')
+        for p, (f_amp, f_pf) in METER_FIELDS.items():
+            amps, pf = row.get(f_amp), row.get(f_pf)
+            try:
+                check_meter_reading(f'Medidor de {row.get("NetworkId")}', p, 0.0 if amps is None else amps,
+                                    0.0 if pf is None else pf)
+            except ValueError as exc:
+                raise EditError(str(exc)) from None
+
     # --- Operaciones ------------------------------------------------------------------------
     def _op_batch(self, op):
         """Varias operaciones que se aplican y se deshacen juntas (p. ej. un grupo de propiedades)."""
@@ -224,6 +243,8 @@ class Editor:
             new = coerce(value, rows[0][field], _sample(all_rows, field))
             self._check_reference(table, field, new)
             clean[field] = new
+        if table == 'CYMNETWORKMETER':
+            self._check_meter({**rows[0], **clean})
         before = {f: rows[0][f] for f in clean}
         live = self._rows(table)
         for row in live:

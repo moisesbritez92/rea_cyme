@@ -193,6 +193,90 @@ def coverage(model):
             'cyme_equivalent_exclusions': len(excluded) - len(real)}
 
 
+# CYMNETWORKMETER DemandType=3 se lee como A-FP por fase (Val1 = A, Val2 = FP %): hipótesis,
+# ver meter_convention en los informes. Solo esas lecturas se pueden reemplazar.
+METER_AMP_PF = 3
+METER_FIELDS = {p: (f'Val1{p}', f'Val2{p}') for p in ABC}
+
+
+def check_meter_reading(where, phase, amps, pf_pct):
+    """Lectura A-FP admisible: corriente ≥ 0 (0 = fase sin medir) y, si se mide, 0 < |FP| ≤ 100 %."""
+    for name, value in (('corriente', amps), ('FP', pf_pct)):
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise ValueError(f'{where} fase {phase}: {name} no numérica o no finita')
+    if amps < 0:
+        raise ValueError(f'{where} fase {phase}: corriente {amps} A negativa')
+    if amps > 0 and not 0 < abs(pf_pct) <= 100:
+        raise ValueError(f'{where} fase {phase}: factor de potencia {pf_pct} % fuera de (0, 100] '
+                         '(negativo = en adelanto)')
+
+
+def parse_meter_override(text):
+    """'RED:FASES=A[/FP]' → {'network', 'phases', 'amps', 'pf_pct'}; FP ausente conserva el de la base.
+
+    La coma decimal se admite dentro de cada número; por eso la corriente y el FP se separan con '/'.
+    """
+    head, sep, values = str(text).partition('=')
+    network, colon, phases = head.rpartition(':')
+    phases = phases.strip().upper()
+    parts = values.split('/')
+    if not sep or not colon or not network.strip() or not phases or len(parts) > 2:
+        raise ValueError(f'Medidor {text!r}: formato esperado RED:FASES=A[/FP], p. ej. CZU06:A=150/95')
+    if set(phases) - set(ABC) or len(set(phases)) != len(phases):
+        raise ValueError(f'Medidor {text!r}: fases admitidas A, B, C sin repetir')
+    try:
+        numbers = [float(p.strip().replace(',', '.')) for p in parts]
+    except ValueError:
+        raise ValueError(f'Medidor {text!r}: número no válido') from None
+    return {'network': network.strip(), 'phases': phases, 'amps': numbers[0],
+            'pf_pct': numbers[1] if len(numbers) == 2 else None}
+
+
+def override_meters(tables, overrides, network_ids=None):
+    """Reemplazar lecturas A-FP de CYMNETWORKMETER; devuelve (tablas nuevas, cambios).
+
+    No modifica `tables`. Rechaza, en lugar de elegir, una red sin medidor o con más de uno, un
+    DemandType distinto de A-FP, una red fuera del cálculo y dos reemplazos de la misma fase.
+    """
+    rows = [dict(r) for r in tables.get('CYMNETWORKMETER', [])]
+    seen, changes = set(), []
+    for item in overrides:
+        net = item['network']
+        if network_ids is not None and net not in network_ids:
+            raise ValueError(f'Medidor de {net}: la red no está entre las calculadas')
+        found = [r for r in rows if r.get('NetworkId') == net]
+        if len(found) != 1:
+            raise ValueError(f'Red {net}: {len(found)} medidores CYMNETWORKMETER (se necesita exactamente uno)')
+        row = found[0]
+        if row.get('DemandType') != METER_AMP_PF or row.get('IsTotalDemand'):
+            raise ValueError(f'Medidor de {net}: DemandType {row.get("DemandType")} no admitido (solo A-FP por fase)')
+        for p in item['phases']:
+            if (net, p) in seen:
+                raise ValueError(f'Medidor de {net} fase {p}: reemplazo repetido')
+            seen.add((net, p))
+            f_amp, f_pf = METER_FIELDS[p]
+            before = {'amps': row.get(f_amp), 'pf_pct': row.get(f_pf)}
+            after = {'amps': item['amps'], 'pf_pct': before['pf_pct'] if item['pf_pct'] is None else item['pf_pct']}
+            check_meter_reading(f'Medidor de {net}', p, after['amps'], after['pf_pct'])
+            row[f_amp], row[f_pf] = float(after['amps']), float(after['pf_pct'])
+            changes.append({'network': net, 'node': row.get('NodeId'), 'phase': p, 'before': before, 'after': after})
+    return {**tables, 'CYMNETWORKMETER': rows}, changes
+
+
+def meter_differences(base, current):
+    """Lecturas A-FP de `current` que difieren de `base` (filas CYMNETWORKMETER), por red y fase."""
+    index = {(r.get('NetworkId'), r.get('NodeId')): r for r in base}
+    out = []
+    for row in current:
+        ref = index.get((row.get('NetworkId'), row.get('NodeId')), {})
+        for p, fields in METER_FIELDS.items():
+            if any(row.get(f) != ref.get(f) for f in fields):
+                out.append({'network': row.get('NetworkId'), 'node': row.get('NodeId'), 'phase': p,
+                            'before': {'amps': ref.get(fields[0]), 'pf_pct': ref.get(fields[1])},
+                            'after': {'amps': row.get(fields[0]), 'pf_pct': row.get(fields[1])}})
+    return out
+
+
 def build(tables, network_ids=None, include_line_charging=True):
     """Devuelve el modelo nodal y la lista de incidencias; no resuelve el flujo."""
     issues = []

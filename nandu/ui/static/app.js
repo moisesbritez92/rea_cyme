@@ -511,9 +511,9 @@ async function select(hit) {
 }
 
 /* ---------------- Explorador ---------------- */
-const GROUP_ORDER = ['Source', 'Regulator', 'Breaker', 'Recloser', 'Fuse', 'Switch', 'ShuntCapacitor'];
-const GROUP_LABEL = { Source: 'Sources', Regulator: 'Regulators', Breaker: 'Breakers', Recloser: 'Reclosers', Fuse: 'Fuses', Switch: 'Switches', ShuntCapacitor: 'Shunt Capacitors' };
-const GROUP_COLOR = { Source: '#0b3d91', Regulator: '#0b3d91', Breaker: '#c00000', Recloser: '#0b3d91', Fuse: '#555', Switch: '#000', ShuntCapacitor: '#006400' };
+const GROUP_ORDER = ['Source', 'Meter', 'Regulator', 'Breaker', 'Recloser', 'Fuse', 'Switch', 'ShuntCapacitor'];
+const GROUP_LABEL = { Source: 'Sources', Meter: 'Meters', Regulator: 'Regulators', Breaker: 'Breakers', Recloser: 'Reclosers', Fuse: 'Fuses', Switch: 'Switches', ShuntCapacitor: 'Shunt Capacitors' };
+const GROUP_COLOR = { Source: '#0b3d91', Meter: '#7a4a00', Regulator: '#0b3d91', Breaker: '#c00000', Recloser: '#0b3d91', Fuse: '#555', Switch: '#000', ShuntCapacitor: '#006400' };
 
 function renderExplorer() {
   const html = ['<ul class="tree root">'];
@@ -1038,6 +1038,17 @@ $('#reportTabs').addEventListener('click', (e) => { const b = e.target.closest('
 /* ---------------- Análisis ---------------- */
 const METHOD_OPTIONS = `<option value="KVAMethod">Connected kVA</option><option value="ActualKVAMethod">Actual kVA</option><option value="KWHMethod">Consumption kWh</option>`;
 
+/* Lecturas que usará el cálculo; las editadas respecto del archivo se marcan. */
+function meterTable() {
+  const meters = (S.geom && S.geom.meters) || [];
+  if (!meters.length) return '<p class="note">No network meters in this project.</p>';
+  const cell = (v) => `${v.modified ? '<b class="modified">' : ''}${v.amps === null ? '' : fmt(v.amps)} A / ${v.pf_pct === null ? '' : fmt(v.pf_pct)} %${v.modified ? ' *</b>' : ''}`;
+  const edited = meters.some((m) => Object.values(m.phases).some((v) => v.modified));
+  return `<table class="rep grid meters"><tr><th>Network</th><th>Node</th><th>A</th><th>B</th><th>C</th></tr>
+    ${meters.map((m) => `<tr><td>${esc(m.network)}</td><td>${esc(m.node)}</td>${'ABC'.split('').map((p) => `<td class="num">${cell(m.phases[p])}</td>`).join('')}</tr>`).join('')}</table>
+    <p class="note">${edited ? '* Modified from the file: results are not comparable with CYME on the original database. ' : ''}To change a reading, select the meter node (Explorer &gt; Meters) and edit it in Properties.</p>`;
+}
+
 function openAnalysis(kind) {
   const lf = kind === 'loadflow';
   $('#dlgTitle').textContent = { loadflow: 'Load Flow Analysis', allocate: 'Load Allocation Analysis', estimate: 'Distribution State Estimator Analysis' }[kind];
@@ -1048,7 +1059,7 @@ function openAnalysis(kind) {
     <fieldset><legend>Load Adjustments</legend><div class="kv">
       <span>Adjust loads using load flow</span><span>Yes</span><span>Tolerance (%)</span><span>0.5</span></div></fieldset>
     <fieldset><legend>Networks and Meters</legend><div class="kv"><span>Networks</span><span>${esc(nets)}</span>
-      <span>Demand</span><span>Network meters at the source (A-PF per phase)</span></div></fieldset>
+      <span>Demand</span><span>Network meters at the source (A-PF per phase)</span></div>${meterTable()}</fieldset>
     <p class="note">Locked loads keep their values. Loads without data for the method receive 0, as in CYME.</p>`;
   } else $('#dlgBody').innerHTML = lf ? `
     <fieldset><legend>Calculation method</legend><div class="kv">
@@ -1073,7 +1084,7 @@ function openAnalysis(kind) {
       <span>Active power error (%)</span><span>50</span><span>Reactive power error (%)</span><span>50</span></div></fieldset>
     <fieldset><legend>Meter accuracy (global)</legend><div class="kv">
       <span>Current error (%)</span><span>3</span><span>Power factor error (%)</span><span>3</span></div></fieldset>
-    <fieldset><legend>Meters</legend><div class="kv"><span>Source</span><span>Network meters (CYMNETWORKMETER)</span></div></fieldset>`;
+    <fieldset><legend>Meters</legend><div class="kv"><span>Source</span><span>Network meters (CYMNETWORKMETER)</span></div>${meterTable()}</fieldset>`;
   for (const [id, key] of [['optMethod', 'method'], ['optInit', 'initialization']]) {
     const el = $('#' + id);
     if (el && S.options[key]) el.value = S.options[key];

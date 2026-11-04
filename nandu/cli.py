@@ -7,6 +7,7 @@ from . import __version__
 from .cyme_import import import_database, list_networks
 from .storage import inspect, load_tables, save_json
 from .topology import TABLES, analyze, summarize
+from . import cyme_model
 from . import electrical
 from . import powerflow
 
@@ -51,6 +52,10 @@ def main(argv=None):
                              help='InitializationMode de CYME')
             cmd.add_argument('--quality', action='store_true',
                              help='Índices de calidad: residuos normalizados y prueba χ² del costo')
+        if name in ('estimate', 'allocate'):
+            cmd.add_argument('--meter', action='append', default=[], metavar='RED:FASES=A[/FP]',
+                             help='Reemplazar la lectura A-FP de un medidor de red (FP en %%, negativo = adelanto; '
+                                  'sin FP conserva el de la base). Repetible. Ej.: CZU06:A=150/95  CZU08:ABC=180')
         cmd.add_argument('file')
         cmd.add_argument('--networks', nargs='+', help='Subconjunto de redes (por defecto, todas)')
         cmd.add_argument('--output', help='Guardar el informe completo (con nodos) en un JSON nuevo')
@@ -72,14 +77,16 @@ def main(argv=None):
             if args.output and Path(args.output).exists():
                 raise FileExistsError(f'El destino ya existe: {args.output}')
             full = bool(args.details or args.output or args.compare_cyme)
+            meters = [cyme_model.parse_meter_override(m) for m in getattr(args, 'meter', [])]
             if args.command == 'loadflow':
                 report = analysis.load_flow(args.file, args.networks, details=full)
             elif args.command == 'estimate':
                 report = analysis.estimate(args.file, args.networks, details=full,
                                            options={'initialization': args.initialization,
-                                                    'quality_indices': args.quality})
+                                                    'quality_indices': args.quality}, meter_overrides=meters)
             else:
-                report = analysis.allocate(args.file, args.networks, details=full, method=args.method)
+                report = analysis.allocate(args.file, args.networks, details=full, method=args.method,
+                                           meter_overrides=meters)
             if args.compare_cyme:
                 report['cyme_comparison'] = analysis.compare_voltages(report, args.compare_cyme)
             if args.output:

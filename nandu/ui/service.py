@@ -100,6 +100,8 @@ class Project:
         self.info = inspect(self.path)
         self.schemas, self.tables = load_source(self.path)
         self.editor = editing.Editor(self.tables)
+        # Lecturas de la base al abrir: referencia para avisar cuando un cálculo usa medidores editados.
+        self.meter_base = [dict(r) for r in self.tables.get('CYMNETWORKMETER', [])]
         self.lock = threading.Lock()
         self.model = None
         self.last = None
@@ -155,8 +157,17 @@ class Project:
             except (ValueError, OverflowError, TypeError):
                 pass  # CRS o posiciones no utilizables: conservar el diagrama sin fondo.
         return {'file': str(self.path), 'networks': networks, 'nodes': nodes, 'sections': sections,
-                 'sources': sources, 'bounds': [min(xs), min(ys), max(xs), max(ys)],
+                 'sources': sources, 'meters': self.meters(), 'bounds': [min(xs), min(ys), max(xs), max(ys)],
                  'crs': crs, 'map_bounds': map_bounds}
+
+    def meters(self):
+        """Lecturas actuales de CYMNETWORKMETER y si difieren de las del archivo abierto."""
+        changed = {(d['network'], d['phase']) for d in cyme_model.meter_differences(
+            self.meter_base, self.tables.get('CYMNETWORKMETER', []))}
+        return [{'network': r.get('NetworkId'), 'node': r.get('NodeId'), 'demand_type': r.get('DemandType'),
+                 'phases': {p: {'amps': r.get(fa), 'pf_pct': r.get(fp), 'modified': (r.get('NetworkId'), p) in changed}
+                            for p, (fa, fp) in cyme_model.METER_FIELDS.items()}}
+                for r in self.tables.get('CYMNETWORKMETER', [])]
 
     def _device_state(self, attachment):
         code = attachment['DeviceType']
@@ -183,6 +194,9 @@ class Project:
         for r in self.tables.get('CYMSOURCE', []):
             tree.setdefault(r['NetworkId'], defaultdict(list))['Source'].append(
                 {'number': r['DeviceNumber'], 'node': r['NodeId']})
+        for r in self.tables.get('CYMNETWORKMETER', []):
+            tree.setdefault(r['NetworkId'], defaultdict(list))['Meter'].append(
+                {'number': f'{r["NetworkId"]} @ {r["NodeId"]}', 'node': r['NodeId']})
         return [{'network': net, 'groups': {k: sorted(v, key=lambda x: x['number']) for k, v in groups.items()},
                  'counts': dict(counts[net])} for net, groups in sorted(tree.items())]
 
@@ -208,7 +222,11 @@ class Project:
             row = self.nodes.get(ident)
             if row is None:
                 raise KeyError(f'Nodo inexistente: {ident}')
-            out = {'title': f'Node {ident}', 'groups': [{'name': 'Information', 'fields': self._fields(row, 'CYMNODE')}]}
+            meters = [{'name': f'Meter {m["NetworkId"]}' + (' (A-PF)' if m.get('DemandType') == cyme_model.METER_AMP_PF else ''),
+                       'fields': self._fields(m, 'CYMNETWORKMETER', METER_LABELS, list(METER_LABELS))}
+                      for m in self.tables.get('CYMNETWORKMETER', []) if m.get('NodeId') == ident]
+            out = {'title': f'Node {ident}',
+                   'groups': meters + [{'name': 'Information', 'fields': self._fields(row, 'CYMNODE')}]}
             if self.last and ident in self.last['nodes']:
                 out['groups'].insert(0, {'name': 'Load Flow', 'fields': [
                     [f'V{p} (kVLN)', v['kv']] for p, v in self.last['nodes'][ident].items()] + [
@@ -361,6 +379,14 @@ class Project:
             else:
                 raise ValueError(f'Análisis desconocido: {analysis}')
             self.last = self._format(analysis, model, sol, res, extra)
+            if analysis in ('estimate', 'allocate'):
+                diffs = cyme_model.meter_differences(self.meter_base, self.tables.get('CYMNETWORKMETER', []))
+                self.last['meter_overrides'] = diffs
+                if diffs:
+                    text = ', '.join(f'{d["network"]} {d["phase"]}: {d["before"]["amps"]} A/{d["before"]["pf_pct"]} % '
+                                     f'-> {d["after"]["amps"]} A/{d["after"]["pf_pct"]} %' for d in diffs)
+                    self.last['messages'].insert(0, {'level': 'warning', 'text':
+                        f'Medidores modificados respecto del archivo ({text}): no comparable con CYME sobre la base'})
             return self.last
 
     def _format(self, analysis, model, sol, res, extra):
@@ -428,6 +454,8 @@ DECODE = {
     'LoadValueType': lambda v: {0: 'KW_KVAR'}.get(v, v),
     'DeviceType': lambda v: DEVICE_NAMES.get(v, v), 'Location': lambda v: LOCATIONS.get(v, v),
 }
+METER_LABELS = {**{f: f'{"Current" if f.startswith("Val1") else "PF"} {f[-1]} ({"A" if f.startswith("Val1") else "%"})'
+                    for f in ('Val1A', 'Val1B', 'Val1C', 'Val2A', 'Val2B', 'Val2C')}, 'DemandType': 'Demand Type'}
 CUSTOMER_LABELS = {'LoadValue1': 'kW', 'LoadValue2': 'kvar', 'Phase': 'Phase', 'ConsumerClassId': 'Customer Type',
                    'ConnectedKVA': 'Connected kVA', 'KWHUsage': 'kWh', 'LockDuringLoadAllocation': 'Locked',
                    'Status': 'Status'}

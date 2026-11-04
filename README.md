@@ -2,7 +2,7 @@
 
 Software para modelar y analizar redes eléctricas de distribución.
 
-## Versión actual: 0.12.0
+## Versión actual: 0.13.0
 
 Reimplementación independiente de CYME 9.0 para redes de distribución. Importa
 bases Access y estudios `.sxst` de CYME a un archivo SQLite propio, conserva las
@@ -14,7 +14,7 @@ nodal propio:
 - **Distribución de carga** (Load Allocation) por kVA conectado, kVA actual o kWh.
 
 Incluye una interfaz local tipo CYME (`nandu ui`), con edición de la red (tramos, equipos,
-cargas y catálogos). No necesita CYME para calcular.
+cargas, catálogos y lecturas de medidores). No necesita CYME para calcular.
 
 **Alcance demostrado y límites.** El flujo se contrastó con CYME en dos
 alimentadores (CZU06/CZU08): 2.690 tensiones, 11,2 V de diferencia máxima. Es un
@@ -870,4 +870,67 @@ por HTTP: alta, código inválido (400), deshacer, nombre de archivo con `../` (
 Save As. La página carga con el menú Edit y los botones nuevos. La interacción con el
 mouse (arrastre, menú contextual, diálogos) no se pudo automatizar: la herramienta de
 captura del navegador no respondió.
+
+## Lecturas de medidor modificables — 0.13.0
+
+El estimador y Load Allocation se pueden correr con lecturas de medidor distintas de la base,
+para ver qué estado resulta con otra demanda de cabecera. Se reemplazan las lecturas A-FP de
+`CYMNETWORKMETER` (`Val1A/B/C` = A, `Val2A/B/C` = FP %) antes de construir el modelo. La
+lectura de `DemandType=3` como A-FP sigue siendo la hipótesis de `meter_convention`.
+
+- **CLI** (`estimate` y `allocate`): `--meter RED:FASES=A[/FP]`, repetible. Las fases van
+  juntas (`ABC`, `A`, `BC`...); sin FP se conserva el de la base; FP negativo = adelanto.
+  La corriente y el FP se separan con `/` porque dentro de cada número se admite la coma
+  decimal (`CZU06:A=100,5/95`).
+
+  ```powershell
+  .\.venv\Scripts\python.exe -m nandu estimate data\czu06-czu08.nandu.sqlite --networks CZU06 --meter CZU06:ABC=210/95
+  .\.venv\Scripts\python.exe -m nandu allocate data\czu06-czu08.nandu.sqlite --meter CZU06:A=188/90 --meter CZU08:C=200
+  ```
+
+- **Interfaz**: el explorador tiene un grupo *Meters*. Al seleccionar el nodo del medidor,
+  Properties muestra el grupo *Meter <red> (A-PF)*, y en modo edición se cambian corriente y
+  FP por fase, con Undo, diario y Save As como cualquier otra edición. Los diálogos de Load
+  Allocation y del estimador muestran las lecturas que se usarán y marcan con `*` las que
+  difieren del archivo abierto.
+
+Solo se editan esas seis lecturas. `DemandType`, las precisiones (`Precision*`) y los totales
+no se tocan, porque el cálculo no los usa o no los admite.
+
+**Trazabilidad.** Un informe con lecturas reemplazadas incluye `meter_overrides` (red, nodo,
+fase, valores antes y después) y `meter_overrides_note`: el resultado no es comparable con una
+corrida de CYME sobre la base sin cambios. En la interfaz, el resultado lleva el mismo
+`meter_overrides` y un aviso al inicio de Messages.
+
+**Rechazos** (código 1 en la CLI y error sin efecto en la interfaz), en lugar de elegir:
+- red sin medidor o con más de uno;
+- `DemandType` distinto de A-FP o demanda total;
+- red fuera de `--networks`;
+- la misma fase reemplazada dos veces;
+- corriente negativa o no numérica;
+- FP fuera de (0, 100] en una fase con corriente.
+
+Una corriente de 0 deja la fase sin medir, como ya hacía `meters_from_model`.
+
+Con los cambios de demanda, Load Allocation puede no converger. Mantiene sus filas ABC
+equilibradas (regla de 0.9.0), así que un medidor muy desbalanceado no siempre se puede
+cumplir en las tres fases. En ese caso el informe lo dice (`status`, código 2).
+
+Verificación: **139 pruebas correctas**. Doce son nuevas (`tests/test_meters.py`):
+- lectura de `--meter` y rechazo de textos ambiguos;
+- reemplazo sin modificar las tablas de entrada, con el diario igual a `meter_differences`;
+- modelo con los valores nuevos, y rechazos;
+- fase con corriente 0;
+- propiedades y explorador del medidor;
+- edición marcada como modificada, que se deshace;
+- valores y campos inválidos sin efecto;
+- aviso en los resultados de la interfaz;
+- informe de `allocate`, cuya potencia de fuente escala con la corriente (60/50 A);
+- CLI de `estimate` y error de FP.
+
+Sobre CZU06 (base de 188/159/161 A, FP 95 %):
+- **Estimador sin cambios**: fuente 6.559 kW.
+- **Estimador con `--meter CZU06:ABC=210/95`**: fuente 8.118 kW, Vmín 83,5 %.
+- **Estimador con FP 90 % en la fase A**: kvar de fuente de 2.143 a 2.432.
+- **Load Allocation con 210 A**: converge, con 210,1/210,2/209,4 A en la fuente.
 

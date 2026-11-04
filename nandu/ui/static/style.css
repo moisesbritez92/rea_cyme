@@ -220,3 +220,6 @@ body.edit-mode #viewWrap { outline: 2px solid #f2b705; outline-offset: -2px; }
 .ctx-list { display: none; position: absolute; left: 100%; top: -3px; min-width: 170px; background: #fff; border: 1px solid #8d97a8; box-shadow: 2px 3px 8px rgba(0,0,0,.2); padding: 2px 0; }
 .ctx-sub:hover > .ctx-list { display: block; }
 .dlg-body input { width: 100%; box-sizing: border-box; font: inherit; }
+.dlg-body table.meters { margin-top: 6px; width: 100%; }
+.dlg-body table.meters td { white-space: nowrap; }
+.modified { color: var(--warn); }

@@ -14,21 +14,21 @@ SQLite, interpreta su semántica y calcula **flujo de carga desbalanceado** y
 por **ingeniería inversa** y se valida contra CYME real mediante el MCP hermano.
 Ñandu no importa código de CYME ni del MCP y no necesita CYME para funcionar.
 
-Versión actual: 0.12.0 (`nandu/__init__.py`, `pyproject.toml`). Ambiente: Windows,
+Versión actual: 0.13.0 (`nandu/__init__.py`, `pyproject.toml`). Ambiente: Windows,
 PowerShell, Python 3.11. Documentación, mensajes y docstrings en español.
 
 ## Comandos
 
 ```powershell
-# Pruebas completas (127; las de OpenDSS y del motor nodal se omiten sin sus paquetes)
+# Pruebas completas (139; las de OpenDSS y del motor nodal se omiten sin sus paquetes)
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 # Una prueba
 .\.venv\Scripts\python.exe -m unittest tests.test_nodal.RegulatorTests.test_closed_delta_relation_and_power_conservation -v
 
 # Motor nodal (numpy + scipy, en .venv)
 .\.venv\Scripts\python.exe -m nandu loadflow data\czu06-czu08.nandu.sqlite [--networks CZU06] [--details] [--output data\x.json]
-.\.venv\Scripts\python.exe -m nandu estimate data\czu06-czu08.nandu.sqlite [--initialization LoadAllocation] [--quality]
-.\.venv\Scripts\python.exe -m nandu allocate data\czu06-czu08.nandu.sqlite [--method KVAMethod|ActualKVAMethod|KWHMethod]
+.\.venv\Scripts\python.exe -m nandu estimate data\czu06-czu08.nandu.sqlite [--initialization LoadAllocation] [--quality] [--meter CZU06:ABC=210/95]
+.\.venv\Scripts\python.exe -m nandu allocate data\czu06-czu08.nandu.sqlite [--method KVAMethod|ActualKVAMethod|KWHMethod] [--meter RED:FASES=A[/FP]]
 .\.venv\Scripts\python.exe -m nandu loadflow data\czu06-czu08.nandu.sqlite --compare-cyme <redes>_node_voltages.csv
 
 # Interfaz gráfica (http://127.0.0.1:8765/)
@@ -71,7 +71,7 @@ JSON nandu-electrical-network-v1 --powerflow (OpenDSS)--> validación independie
 | `nandu/allocation.py` | Load Allocation (kVA conectado/actual, kWh) ajustada con flujo de carga | numpy, scipy |
 | `nandu/sxst_import.py` | Estudios CYME `.sxst` (XML) → tablas tipo Access → `.nandu.sqlite` | stdlib |
 | `nandu/analysis.py` | Informes JSON y comparación con CSV de CYME | numpy, scipy |
-| `nandu/ui/` | Interfaz tipo CYME: `server.py` (http.server, solo 127.0.0.1), `service.py` (geometría, propiedades, informes), `editing.py` (edición de tablas CYME con deshacer y diario; Save As a proyecto nuevo), `static/` (HTML/JS/CSS sin dependencias) | stdlib; numpy/scipy al calcular |
+| `nandu/ui/` | Interfaz tipo CYME: `server.py` (http.server, solo 127.0.0.1), `service.py` (geometría, propiedades, informes), `editing.py` (edición de tablas CYME, lecturas de medidor incluidas, con deshacer y diario; Save As a proyecto nuevo), `static/` (HTML/JS/CSS sin dependencias) | stdlib; numpy/scipy al calcular |
 | `nandu/powerflow.py` | Motor OpenDSS para el formato JSON nativo (validador) | `dss-python` |
 
 ## Reglas del proyecto (no negociables)
