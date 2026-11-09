@@ -2,7 +2,7 @@
 
 Software para modelar y analizar redes eléctricas de distribución.
 
-## Versión actual: 0.13.0
+## Versión actual: 0.14.0
 
 Reimplementación independiente de CYME 9.0 para redes de distribución. Importa
 bases Access y estudios `.sxst` de CYME a un archivo SQLite propio, conserva las
@@ -15,6 +15,10 @@ nodal propio:
 
 Incluye una interfaz local tipo CYME (`nandu ui`), con edición de la red (tramos, equipos,
 cargas, catálogos y lecturas de medidores). No necesita CYME para calcular.
+
+Desde 0.14.0 importa también tablas CYME desde JSON (`import-tables`), con lo que se armó una
+base estructural del SIN (500/220/66/23 kV) a partir del esquema unifilar: topología y
+maniobras, todavía sin parámetros eléctricos.
 
 **Alcance demostrado y límites.** El flujo se contrastó con CYME en dos
 alimentadores (CZU06/CZU08): 2.690 tensiones, 11,2 V de diferencia máxima. Es un
@@ -934,3 +938,132 @@ Sobre CZU06 (base de 188/159/161 A, FP 95 %):
 - **Estimador con FP 90 % en la fase A**: kvar de fuente de 2.143 a 2.432.
 - **Load Allocation con 210 A**: converge, con 210,1/210,2/209,4 A en la fuente.
 
+
+## Base del SIN desde el esquema unifilar — 0.14.0
+
+Ñandu importa ahora tablas con el formato de CYME desde un JSON (`nandu-cyme-tables-v1`).
+El primer uso es el **Sistema Interconectado Nacional**: el esquema armado en
+`eventos_ens/esquema` (unifilar `SIN2026-10V1.pdf` + SCADA + mímicos + correcciones a mano)
+se traduce a una red CYME `SIN` y se guarda como cualquier otro `.nandu.sqlite`.
+
+```bash
+# en eventos_ens/esquema (networkx + PyYAML): grafo corregido → tablas CYME
+../.venv/bin/python exportar_cyme.py                      # → sin_cyme.json
+# en rea_cyme (solo stdlib)
+python -m nandu import-tables --tables ../eventos_ens/esquema/sin_cyme.json --output data/sin-geo-20261109.nandu.sqlite
+python -m nandu topology data/sin-geo-20261109.nandu.sqlite
+python -m nandu ui data/sin-geo-20261109.nandu.sqlite
+```
+
+El exportador vive con el esquema, que es dueño de su semántica (extracción del PDF, correcciones,
+abiertos). Ñandu no importa su código: solo comprueba la forma del documento (formato, filas
+escalares, números finitos, convenciones con `authority` admitida), audita la estructura con
+`model.validate` y guarda las tablas sin reinterpretarlas. La procedencia registra el SHA-256 del
+JSON, el del PDF, una huella de los 129 archivos de entrada y las convenciones declaradas.
+
+### Traducción
+
+| Esquema | Tablas CYME |
+|---|---|
+| barras y uniones del dibujo | `CYMNODE` en UTM 21 S (`CoordinateSystem` EPSG:32721, como la base CYME): la ubicación de la estación (`geojson/estaciones.geojson`) y, alrededor, su unifilar del PDF a 10 m por punto. Las del PDF quedan en `ESQ_NODO` |
+| interruptor | tramo con Breaker (8); abierto en el dibujo o en `abiertos_manual.yaml` → `ClosedPhase` 0, `NormalStatus` 0 |
+| transformador de 2 devanados | tramo con Transformer (5), de la tensión mayor a la menor; `CYMEQTRANSFORMER` con kV y MVA cuando el mímico la da |
+| transformador de 3 devanados | `CYMTHREEWINDINGTRANSFORMER` con `DeviceType` nulo; terciario en `CYMSECTIONNODE` |
+| línea (o líneas unidas por las correcciones) | OverheadLine (2) entre sus extremos, uno por estación; con derivaciones, estrella desde el punto de derivación. `Length` en m y forma (`CYMINTERMEDIATEPOINT`) sobre el trazado del inventario georreferenciado; sin conductor (`LineId` nulo) |
+| alimentador de 23 kV (SCADA) | interruptor desde su barra hasta una cabecera `EST_ALnn` |
+| centrales MD, AYO, CHACY y ACY | `CYMSOURCE` en cada barra, a tensión nominal (supuesto de la ENS) |
+
+Las tablas `ESQ_*` guardan lo que CYME no tiene: estación, número, bahía SCADA, `id_pdf`, confianza
+y motivo de revisión de cada equipo (`ESQ_EQUIPO`), nombres e inventario georreferenciado de líneas
+(`ESQ_LINEA`), estaciones con su ubicación (`ESQ_ESTACION`, de la base maestra), alimentadores y su
+red CYME candidata (`ESQ_ALIMENTADOR`: CZU + AL06 → CZU06), nodos con tensión y nombres del grafo
+(`ESQ_NODO`), las 182 correcciones aplicadas y los problemas (`ESQ_PROBLEMA`).
+
+**Códigos.** `DeviceType` 5 = Transformer se verificó en `BD_respaldo_lc.mdb` (CYME 9.0 r4), leída con
+mdbtools en solo lectura (SHA-256 `0bd0098e…cfe1`, igual antes y después): `CYMTRANSFORMER.DeviceType`
+= 5 y su fila en `CYMSECTIONDEVICE`. La base no tiene transformadores de tres devanados, así que su
+código y la ubicación del terciario siguen sin verificar. `NormalStatus` 0 = normalmente abierto es una
+hipótesis (26 filas de `CYMSWITCH` con `ClosedPhase` 0 y `NormalStatus` 0); el análisis usa `ClosedPhase`.
+
+**Decisiones del exportador** (cada caso queda en `ESQ_PROBLEMA`):
+- Se usa el grafo con los abiertos incluidos y marcados, no quitados: así entran los interruptores que
+  el mímico agrega aunque estén abiertos (CZU 89).
+- En un devanado, el trazo entre los círculos (toca los dos devanados) y los muñones (solo tocan el
+  transformador) son del dibujo y se descartan (45 transformadores). Si quedan dos nodos externos, el
+  transformador se excluye: no se funden barras.
+- Una línea de las correcciones que el dibujo reduce a un punto (BMO 71 y PBO 88 se tocan en N152) se
+  separa: los equipos de la otra estación pasan a un extremo propio y la línea va entre los dos (27).
+- Alimentadores sin barra en el mímico: si la estación tiene una sola barra de su tensión, va ahí (30);
+  si no, sin tramo (67). CAP tiene dos interruptores SCADA por salida (`52_AL01` y `52_AL01G`): uno por
+  cabecera.
+- Interruptores sin ningún lado reconocido (12) y transformadores con un solo devanado propio (12) quedan
+  en `ESQ_EQUIPO` con `Incluido` falso.
+
+### Ubicación y longitudes
+
+- **Estaciones**: con la regla de `visor.py` (MD en Itaipú, adonde llegan sus líneas del inventario; sin el
+  número final: CON1 → CON), 120 de 122 en la base maestra; CAIASA y CDM1 en la media de sus vecinas por
+  línea (`estacion_ubicacion_estimada`). Contraste con la base CYME: en 68 cabeceras de alimentador, la
+  ubicación de la estación queda a 72 m (mediana) del nodo fuente de `BD_respaldo_lc.mdb`; máximo 528 m
+  (CYO). La conversión WGS84 → UTM da 7.235.052 m N para (−57°, −25°), como la teórica.
+- **Extremos de línea**: uno por estación. Varios interruptores de la misma estación (interruptor y
+  medio) llegan al mismo punto, así una línea VAL–VHA con cinco interruptores es un tramo, no una estrella
+  de cinco. Una barra enganchada a la línea por una corrección (`barra_kv`, «interruptor del otro extremo
+  no identificado», LM26 en COV) queda como extremo propio: fundida, dejaba en bucle a COV 81 y 82.
+- **Longitud** (`Length`, metros: hipótesis del perfil `cyme9-si-candidate`): los trazados existentes de
+  la misma tensión forman una red (vértices a lo largo de cada trazado; una punta a ≤ 300 m de otro
+  trazado lo continúa o deriva). Cada estación se ancla a los trazados que pasan a ≤ 3 km, sumando esa
+  distancia. Dos extremos: camino más corto, sin atravesar otras estaciones. Derivación: el punto de la
+  red con menor suma de distancias es el centro, y cada brazo mide hasta ahí. Antes que la red se prueba el
+  trazado que `lineas.yaml` nombra (`inventario_geo`), uno distinto por circuito (IPU–YZU I y II para L018 y
+  L017), y después la red de los nombrados: 83 líneas van por su trazado del inventario y 68 por la red
+  (`ESQ_LINEA.MetodoLongitud`). 71 trazados del inventario no son de ninguna línea de la base: 15 en
+  construcción, 28 con estaciones fuera del esquema y 28 entre estaciones del esquema que el unifilar no
+  une (IPU–MD 1 a 4, COV–PPE, LIM–ELK, SES–IRO, SLO–VAU…). El visor los dibuja; la base no los modela. Se rechaza un camino por
+  varios trazados de más del doble de la recta (VAL–YZU, LM01/02: 511 km por MD y VHA, porque el
+  inventario no tiene ese trazado); de más de 1,5 veces queda marcado. Una línea a una estación de
+  ubicación estimada queda sin longitud (CAIASA cae sobre VTA, su única vecina). Las anclas son puntos
+  del segmento, que queda partido en ellas: dos estaciones sobre el mismo segmento se unen por el tramo
+  entre ellas, no yendo hasta un vértice y volviendo. 149 de 164 líneas tienen longitud, 7.306 km en
+  total; trazado/recta: mediana 1,14.
+- **Forma** (`CYMINTERMEDIATEPOINT`): el mismo camino, como puntos intermedios. Convención verificada en
+  `BD_respaldo_lc.mdb` (37.762 puntos en 12.907 tramos): `PointIndex` desde 0, de From a To, sin los
+  extremos; de los 6.934 tramos con dos puntos o más y sentido claro, ninguno va de To a From.
+  3.542 puntos; el largo de la poligonal dibujada es 1,016 veces `Length` (mediana). La interfaz dibuja,
+  selecciona, ubica los símbolos y hace zoom por esos puntos; antes unía From y To en recta.
+
+### Resultado (9 nov. 2026)
+
+`sin_cyme.json` → `data/sin-geo-20261109.nandu.sqlite`: 1 red, 2.006 nodos, 2.211 tramos (1.745
+interruptores, 186 abiertos; 226 transformadores de 2 devanados y 15 de 3; 225 tramos de línea en 164
+líneas, 3.542 puntos intermedios; 762 alimentadores con tramo de 829), 21 fuentes, 299 problemas. Auditoría estructural: 15
+errores, los 15 transformadores de tres devanados (`unsupported_device`). La primera versión, con
+coordenadas del PDF y un extremo por interruptor, quedó en `data/sin-20261109.nandu.sqlite`.
+
+`topology`: 15 tramos excluidos (los mismos), 1.551 de 2.005 nodos alcanzados desde las centrales por
+fase, 162 componentes. **Contraste con la ENS** (`grafo.cargar(solo_cerrados=True, correcciones=True)`,
+camino a las barras de las centrales): tratando en memoria los transformadores de tres devanados como
+conexión, las 338 barras que la ENS alcanza también se alcanzan en la base, y se suman CAT y PCA 66 kV,
+por los interruptores del mímico que la ENS omite al quitar los abiertos. Sin esa prueba, 50 de las barras
+que la ENS alcanza quedan sin camino por los tres devanados (PBO, PSA, LAM, LPA, MRA, SMI, REP…).
+
+La interfaz abre la base sobre el mapa (OpenStreetMap o satélite) y muestra Breaker, Transformer y
+Source en el explorador; las líneas siguen su trazado y cada tramo muestra su `Length`. **No hay parámetros eléctricos**: ni
+impedancias de línea (falta el conductor de cada una), ni de transformador, ni cargas. `loadflow` no
+corresponde todavía.
+
+Pendientes:
+1. Código Access de `ThreeWindingTransformer` y dónde guarda CYME el nodo terciario: crear uno en
+   CYME y leer la base. Hasta entonces, 15 transformadores quedan fuera de la topología.
+2. Impedancias: conductor (o R/X/B por km) de cada línea y, de cada transformador, MVA, Z %, X/R,
+   grupo de conexión y taps (¿PSS/E de ANDE? ver `proyecto_futuro.md`). Revisar las 14 líneas sin
+   longitud y las 6 marcadas.
+3. Unir las cabeceras de alimentadores con las redes de distribución de la base CYME.
+
+Verificación: **145 pruebas correctas** con Python 3.11 (en este equipo, Python 3.10: las 2 de
+`test_sxst_import` que usan `hashlib.file_digest` fallan por la versión). Cinco son nuevas
+(`tests/test_tables_import.py`): importación con procedencia y semántica declarada, destino
+existente, transformador que conduce e interruptor abierto que corta, transformador con
+`Status` ≠ 0 excluido, y rechazo de formato, valores no escalares o no finitos y convenciones
+sin autoridad. La sexta (`test_ui`): puntos intermedios ordenados por `PointIndex`, filtrados por red y
+proyectados al mapa.

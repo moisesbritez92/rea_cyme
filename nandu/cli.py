@@ -26,6 +26,9 @@ def main(argv=None):
     study.add_argument('--study', required=True)
     study.add_argument('--networks', nargs='+')
     study.add_argument('--output', required=True)
+    tables = commands.add_parser('import-tables', help='Importar tablas tipo CYME de un JSON (nandu-cyme-tables-v1)')
+    tables.add_argument('--tables', required=True)
+    tables.add_argument('--output', required=True)
     inspection = commands.add_parser('inspect', help='Consultar una importación sin CYME ni Access')
     inspection.add_argument('file')
     topology = commands.add_parser('topology', help='Analizar conectividad condicional por fase')
@@ -103,6 +106,11 @@ def main(argv=None):
         if args.command == 'import-sxst':
             from .sxst_import import import_study
             result = import_study(args.study, args.output, args.networks)
+            print(json.dumps(result, indent=2, ensure_ascii=False, allow_nan=False))
+            return 0
+        if args.command == 'import-tables':
+            from .tables_import import import_tables
+            result = import_tables(args.tables, args.output)
             print(json.dumps(result, indent=2, ensure_ascii=False, allow_nan=False))
             return 0
         if args.command == 'networks':

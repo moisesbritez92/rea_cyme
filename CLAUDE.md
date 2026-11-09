@@ -14,13 +14,13 @@ SQLite, interpreta su semántica y calcula **flujo de carga desbalanceado** y
 por **ingeniería inversa** y se valida contra CYME real mediante el MCP hermano.
 Ñandu no importa código de CYME ni del MCP y no necesita CYME para funcionar.
 
-Versión actual: 0.13.0 (`nandu/__init__.py`, `pyproject.toml`). Ambiente: Windows,
+Versión actual: 0.14.0 (`nandu/__init__.py`, `pyproject.toml`). Ambiente: Windows,
 PowerShell, Python 3.11. Documentación, mensajes y docstrings en español.
 
 ## Comandos
 
 ```powershell
-# Pruebas completas (139; las de OpenDSS y del motor nodal se omiten sin sus paquetes)
+# Pruebas completas (145; las de OpenDSS y del motor nodal se omiten sin sus paquetes)
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 # Una prueba
 .\.venv\Scripts\python.exe -m unittest tests.test_nodal.RegulatorTests.test_closed_delta_relation_and_power_conservation -v
@@ -37,6 +37,7 @@ PowerShell, Python 3.11. Documentación, mensajes y docstrings en español.
 # Importación y análisis estructural (Access requiere pyodbc + ODBC de 64 bits; el resto, stdlib)
 py -3.11 -m nandu import-cyme --database "C:\Users\moise\Documents\020_CYM_MCP\data\BD_Centro0926.mdb" --networks CZU06 CZU08 --output data\nuevo.nandu.sqlite
 py -3.11 -m nandu import-sxst --study <estudio>.sxst [--networks CZU06] --output data\nuevo.nandu.sqlite
+py -3.11 -m nandu import-tables --tables <tablas>.json --output data\nuevo.nandu.sqlite   # p. ej. el SIN (README 0.14.0)
 py -3.11 -m nandu inspect data\czu06-czu08.nandu.sqlite
 py -3.11 -m nandu topology data\czu06-czu08.nandu.sqlite
 .\.venv\Scripts\python.exe -m nandu solve examples\delta-compensated.json   # OpenDSS, validador
@@ -52,6 +53,7 @@ pero `model_coverage.status` es `incomplete` (se excluyó algo que CYME calcula)
 ```text
 Access (.mdb CYME) --cyme_import--> .nandu.sqlite --cyme_model--> modelo por fase
 Estudio (.sxst) ----sxst_import-->      |                |--nodal-------> flujo (Newton, MANA) + control de taps
+JSON de tablas ---tables_import-->      |                |
                                         |                |--allocation--> Load Allocation (método CYME + flujo)
                                         |                |--estimator---> estimador WLS (Hachtel) + índices de calidad
                                         └--ui (http://127.0.0.1:8765)
@@ -70,6 +72,7 @@ JSON nandu-electrical-network-v1 --powerflow (OpenDSS)--> validación independie
 | `nandu/estimator.py` | WLS con restricciones; cargas = pseudomedidas; medidores AMP-FP | numpy, scipy |
 | `nandu/allocation.py` | Load Allocation (kVA conectado/actual, kWh) ajustada con flujo de carga | numpy, scipy |
 | `nandu/sxst_import.py` | Estudios CYME `.sxst` (XML) → tablas tipo Access → `.nandu.sqlite` | stdlib |
+| `nandu/tables_import.py` | JSON `nandu-cyme-tables-v1` (tablas ya en códigos Access, con procedencia y convenciones) → `.nandu.sqlite`. Lo produce `eventos_ens/esquema/exportar_cyme.py` para el SIN | stdlib |
 | `nandu/analysis.py` | Informes JSON y comparación con CSV de CYME | numpy, scipy |
 | `nandu/ui/` | Interfaz tipo CYME: `server.py` (http.server, solo 127.0.0.1), `service.py` (geometría, propiedades, informes), `editing.py` (edición de tablas CYME, lecturas de medidor incluidas, con deshacer y diario; Save As a proyecto nuevo), `static/` (HTML/JS/CSS sin dependencias) | stdlib; numpy/scipy al calcular |
 | `nandu/powerflow.py` | Motor OpenDSS para el formato JSON nativo (validador) | `dss-python` |
@@ -157,6 +160,11 @@ Precauciones:
 - Estado de la base: 4 reguladores ClosedDelta en FixedTap (REG-*-A, 23,8 kV LL);
   medidores `CYMNETWORKMETER` de cabecera en A/FP; cargas en kW/kvar.
 - `data/` y `.venv/` están en `.gitignore`.
+- SIN: `data/sin-geo-20261109.nandu.sqlite`, desde `../eventos_ens/esquema/sin_cyme.json`
+  (`exportar_cyme.py`): UTM 21 S y longitudes de línea del trazado; sin impedancias ni cargas. Base CYME de referencia
+  en Linux: `/home/mb/ANDE/BD_respaldo_lc.mdb` (71 redes), legible con mdbtools en solo
+  lectura; sirvió para verificar Transformer = 5. Este equipo tiene Python 3.10: las 2
+  pruebas de `test_sxst_import` con `hashlib.file_digest` fallan por versión.
 
 ## Pendientes principales
 
@@ -167,7 +175,7 @@ Precauciones:
 2. Escritor `.sxst`/Access para devolver resultados a CYME; multiplicadores de Lagrange
    normalizados; medidores intermedios en Load Allocation; modo de taps `Infinite`.
 3. Interfaz: vista esquemática y escenarios; transformadores y GD. La edición de red (0.12.0)
-   no mueve aún puntos intermedios (`CYMINTERMEDIATEPOINT`) ni reconecta tramos.
+   no mueve aún puntos intermedios (`CYMINTERMEDIATEPOINT`, que desde 0.14.0 se dibujan) ni reconecta tramos.
 4. De la revisión técnica de 0.9.0 (`looping/`, respondida en 0.10.0): estimador calibrado
    con covarianzas propagadas y rango verificado (H6); escalamiento y búsqueda lineal en
    Newton; validación en alimentadores externos al ajuste (calibración ≠ validación);

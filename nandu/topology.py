@@ -1,7 +1,9 @@
 """Conectividad condicional por fase. No calcula tensión ni flujo eléctrico.
 
 Perfil CYME 9: fases 1..7 contrastadas con CymPhase en Cyme64.tlb.
-Tipos Access contrastados por coincidencia de instancias con tablas de dispositivos.
+Tipos Access contrastados por coincidencia de instancias con tablas de dispositivos
+(Transformer = 5: CYMTRANSFORMER.DeviceType y CYMSECTIONDEVICE de BD_respaldo_lc.mdb). Un
+transformador solo une sus dos nodos; no se modela grupo de conexión, desfase ni relación.
 Status=0 se admite como hipótesis explícita; cualquier otro estado bloquea el tramo.
 """
 from collections import Counter, defaultdict, deque
@@ -13,6 +15,7 @@ DEVICES = {
     2: ('CYMOVERHEADLINE', 'series'),
     23: ('CYMOVERHEADLINEUNBALANCED', 'series'),
     4: ('CYMREGULATOR', 'series'),
+    5: ('CYMTRANSFORMER', 'series'),
     8: ('CYMBREAKER', 'switch'),
     10: ('CYMRECLOSER', 'switch'),
     13: ('CYMSWITCH', 'switch'),

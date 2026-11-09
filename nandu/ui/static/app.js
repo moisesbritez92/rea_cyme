@@ -53,6 +53,7 @@ function prepareMapGeometry(geom) {
   if (points.some((point) => !point)) return;
   const bounds = [Infinity, Infinity, -Infinity, -Infinity];
   geom.nodes.forEach((node, i) => { [node.mx, node.my] = points[i]; });
+  for (const sec of geom.sections) for (const q of sec.points || []) [q.mx, q.my] = projectUtm(q.x, q.y, zone, epsg >= 32700) || [NaN, NaN];
   for (const [mx, my] of points) {
     bounds[0] = Math.min(bounds[0], mx); bounds[1] = Math.min(bounds[1], my);
     bounds[2] = Math.max(bounds[2], mx); bounds[3] = Math.max(bounds[3], my);
@@ -136,6 +137,26 @@ const H = () => canvas.height / S.dpr;
 const mapEnabled = () => $('#mapLayer').value !== 'none' && !!S.geom?.map_bounds;
 const point = (n) => mapEnabled() ? [n.mx, n.my] : [n.x, n.y];
 const screenNode = (n) => toScreen(...point(n));
+// Recorrido del tramo: From, puntos intermedios (CYMINTERMEDIATEPOINT, de From a To) y To.
+const sectionPath = (sec) => [S.nodes.get(sec.from), ...(sec.points || []), S.nodes.get(sec.to)].map(screenNode);
+function strokePath(path) {
+  ctx.beginPath(); ctx.moveTo(...path[0]);
+  for (let i = 1; i < path.length; i++) ctx.lineTo(...path[i]);
+  ctx.stroke();
+}
+function offScreen(path, margin) {
+  const xs = path.map((q) => q[0]), ys = path.map((q) => q[1]);
+  return Math.max(...xs) < -margin || Math.min(...xs) > W() + margin || Math.max(...ys) < -margin || Math.min(...ys) > H() + margin;
+}
+// Segmento del recorrido donde va un equipo: el primero (From), el último (To) o el que contiene la mitad del largo.
+function pathSegment(path, loc) {
+  if (loc === 'From') return [path[0], path[1]];
+  if (loc !== 'Middle') return [path[path.length - 2], path[path.length - 1]];
+  const lengths = path.slice(1).map((q, i) => Math.hypot(q[0] - path[i][0], q[1] - path[i][1]));
+  let half = lengths.reduce((a, b) => a + b, 0) / 2;
+  for (let i = 0; i < lengths.length; i++) { if (half <= lengths[i]) return [path[i], path[i + 1]]; half -= lengths[i]; }
+  return [path[0], path[path.length - 1]];
+}
 function updateCrs() { $('#crs').textContent = mapEnabled() ? 'EPSG:3857' : (S.geom?.crs || ''); }
 const toScreen = (x, y) => [x * S.view.s + S.view.tx, -y * S.view.s + S.view.ty];
 const toWorld = (sx, sy) => [(sx - S.view.tx) / S.view.s, -(sy - S.view.ty) / S.view.s];
@@ -239,19 +260,16 @@ function draw() {
   // Selección debajo, como el halo de CYME.
   if (sel && sel.kind === 'section' && S.sectionById.has(sel.id)) {
     const sec = S.sectionById.get(sel.id);
-    const a = screenNode(S.nodes.get(sec.from));
-    const b = screenNode(S.nodes.get(sec.to));
-    ctx.strokeStyle = 'rgba(51,153,255,.45)'; ctx.lineWidth = 9; ctx.setLineDash([]); ctx.lineCap = 'round';
-    ctx.beginPath(); ctx.moveTo(...a); ctx.lineTo(...b); ctx.stroke();
+    ctx.strokeStyle = 'rgba(51,153,255,.45)'; ctx.lineWidth = 9; ctx.setLineDash([]); ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    strokePath(sectionPath(sec));
   }
   ctx.lineCap = 'butt';
   for (const sec of S.sections) {
     const st = styleFor(sec);
-    const a = screenNode(S.nodes.get(sec.from));
-    const b = screenNode(S.nodes.get(sec.to));
-    if (Math.max(a[0], b[0]) < -20 || Math.min(a[0], b[0]) > W() + 20 || Math.max(a[1], b[1]) < -20 || Math.min(a[1], b[1]) > H() + 20) continue;
+    const path = sectionPath(sec);
+    if (offScreen(path, 20)) continue;
     ctx.strokeStyle = st.color; ctx.lineWidth = st.width; ctx.setLineDash(st.dash);
-    ctx.beginPath(); ctx.moveTo(...a); ctx.lineTo(...b); ctx.stroke();
+    strokePath(path);
   }
   ctx.setLineDash([]);
   const zoomed = S.view.s > 0.08;
@@ -286,12 +304,12 @@ function devicePoint(sec, loc, a, b) {
 
 function drawDevices(zoomed) {
   for (const sec of S.sections) {
-    const a = screenNode(S.nodes.get(sec.from));
-    const b = screenNode(S.nodes.get(sec.to));
-    if (Math.max(a[0], b[0]) < 0 || Math.min(a[0], b[0]) > W() || Math.max(a[1], b[1]) < 0 || Math.min(a[1], b[1]) > H()) continue;
+    const path = sectionPath(sec);
+    if (offScreen(path, 0)) continue;
     for (const d of sec.devices) {
       const major = ['Regulator', 'Recloser', 'Breaker', 'ShuntCapacitor'].includes(d.type);
       if (!zoomed && !major) continue;
+      const [a, b] = pathSegment(path, d.location);
       const [x, y, ang, len] = devicePoint(sec, d.location, a, b);
       if (len < 18 && !major) continue;
       symbol(d, x, y, ang, sec);
@@ -372,8 +390,7 @@ function drawTags() {
   } else if (layer === 'current' && S.last && S.last.sections) {
     for (const sec of S.sections) {
       const r = S.last.sections[sec.id]; if (!r) continue;
-      const a = screenNode(S.nodes.get(sec.from));
-      const b = screenNode(S.nodes.get(sec.to));
+      const [a, b] = pathSegment(sectionPath(sec), 'Middle');
       const x = (a[0] + b[0]) / 2, y = (a[1] + b[1]) / 2;
       if (x < 0 || y < 0 || x > W() || y > H()) continue;
       boxes.push([x + 6, y + 6, [sec.id, ...Object.entries(r.current_a).map(([p, v]) => `I${p.toLowerCase()} = ${fmt(v, 1)} A`)]]);
@@ -419,12 +436,14 @@ function hitTest(sx, sy) {
   }
   if (best) return best;
   for (const sec of S.sections) {
-    const a = screenNode(S.nodes.get(sec.from));
-    const b = screenNode(S.nodes.get(sec.to));
-    const vx = b[0] - a[0], vy = b[1] - a[1];
-    const t = Math.max(0, Math.min(1, ((sx - a[0]) * vx + (sy - a[1]) * vy) / (vx * vx + vy * vy || 1)));
-    const d = Math.hypot(a[0] + t * vx - sx, a[1] + t * vy - sy);
-    if (d < 5 && (!best || d < best.d)) best = { kind: 'section', id: sec.id, d };
+    const path = sectionPath(sec);
+    for (let i = 1; i < path.length; i++) {
+      const a = path[i - 1], b = path[i];
+      const vx = b[0] - a[0], vy = b[1] - a[1];
+      const t = Math.max(0, Math.min(1, ((sx - a[0]) * vx + (sy - a[1]) * vy) / (vx * vx + vy * vy || 1)));
+      const d = Math.hypot(a[0] + t * vx - sx, a[1] + t * vy - sy);
+      if (d < 5 && (!best || d < best.d)) best = { kind: 'section', id: sec.id, d };
+    }
   }
   return best;
 }
@@ -492,9 +511,10 @@ function zoomTo(hit) {
   let x0, y0, x1, y1;
   if (hit.kind === 'node') { const [x, y] = point(S.nodes.get(hit.id)); [x0, y0, x1, y1] = [x - 150, y - 150, x + 150, y + 150]; }
   else {
-    const sec = S.sectionById.get(hit.id); const a = S.nodes.get(sec.from), b = S.nodes.get(sec.to);
-    const [ax, ay] = point(a), [bx, by] = point(b);
-    [x0, y0, x1, y1] = [Math.min(ax, bx) - 150, Math.min(ay, by) - 150, Math.max(ax, bx) + 150, Math.max(ay, by) + 150];
+    const sec = S.sectionById.get(hit.id);
+    const pts = [S.nodes.get(sec.from), ...(sec.points || []), S.nodes.get(sec.to)].map(point);
+    const xs = pts.map((q) => q[0]), ys = pts.map((q) => q[1]);
+    [x0, y0, x1, y1] = [Math.min(...xs) - 150, Math.min(...ys) - 150, Math.max(...xs) + 150, Math.max(...ys) + 150];
   }
   fitExtents([x0, y0, x1, y1]);
 }

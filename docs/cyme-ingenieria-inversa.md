@@ -79,6 +79,17 @@ Lagrange normalizados y desajustes totales por tipo de medida.
 | `CYMREGULATOR.ConnectionConfiguration` | 0 Yg, 4 ClosedDelta | typelib + `.sxst` |
 | `CYMREGULATOR.SettingOption` | 2 FixedTap (3 Terminal) | typelib `CymSettingOption` |
 | `CYMEQREGULATOR` | paso = MaximumBoost / (NumberOfTaps/2) = 0,625 % | catálogo |
+| `CYMINTERMEDIATEPOINT` | forma del tramo: `PointIndex` desde 0, de From a To, sin los extremos | 12.907 tramos de `BD_respaldo_lc.mdb`; 6.934 con sentido claro, todos From → To |
+| `CYMSECTIONDEVICE.DeviceType` | 5 Transformer | `CYMTRANSFORMER.DeviceType` = 5 y su fila en `CYMSECTIONDEVICE` (red AUX, `BD_respaldo_lc.mdb`) |
+| `CYMBREAKER`/`CYMSWITCH.NormalStatus` | 0 = normalmente abierto (**hipótesis**) | `CYMSWITCH`: 993 (7, 1), 130 (0, 1), 26 (0, 0) en (ClosedPhase, NormalStatus); `Status` siempre 0 |
+
+`BD_respaldo_lc.mdb` (9 nov. 2026, SHA-256 `0bd0098e7e8203dadef2ae899045b82b1e7f5037541f214e7e74066b2623cfe1`)
+se leyó en Linux con mdbtools 1.0 en solo lectura (el SHA-256 no cambió). Conteo de `DeviceType` en
+`CYMSECTIONDEVICE`: 23 (16.825), 2 (16.421), 20 (16.164), 13 (1.174), 1 (969), 10 (150), 12 (94), 14 (86),
+8 (64), 4 (37), 17 (14), 22 (2), 5 (1). Los códigos 12 y 22 no están identificados. La base no tiene
+transformadores de tres devanados: `CYMTHREEWINDINGTRANSFORMER` no tiene columna de nodo terciario y existe
+una tabla `CYMSECTIONNODE` (SectionId, NodeId, NodeConnectorIndex, BreakPointIndex), vacía, que podría
+guardarlo; sin verificar.
 
 ## Regulador en delta cerrado (ajuste a resultados)
 

@@ -12,7 +12,7 @@ from .. import cyme_model
 from . import editing
 
 ABC = 'ABC'
-DEVICE_NAMES = {1: 'Underground', 2: 'OverheadLine', 4: 'Regulator', 8: 'Breaker', 10: 'Recloser',
+DEVICE_NAMES = {1: 'Underground', 2: 'OverheadLine', 4: 'Regulator', 5: 'Transformer', 8: 'Breaker', 10: 'Recloser',
                 13: 'Switch', 14: 'Fuse', 17: 'ShuntCapacitor', 20: 'SpotLoad', 23: 'OverheadLineUnbalanced'}
 LOCATIONS = {0: 'Middle', 1: 'From', 2: 'To'}
 # Textos de CYME para las conexiones y modos internos del modelo (mismos nombres que DECODE).
@@ -21,10 +21,10 @@ TAP_MODE_TEXT = {'fixed': 'FixedTap', 'load_center': 'LoadCenter', 'rx': 'RXSett
 VOLTAGE_LIMITS = (0.95, 1.05)  # Informe CYME «Buses outside limits»: alguna fase fuera de la banda.
 EXTRA_TABLES = {'CYMNODE', 'CYMNETWORK', 'CYMDBPARAMETERS', 'CYMEQOVERHEADLINE', 'CYMEQCABLE', 'CYMEQOVERHEADLINEUNBALANCED',
                 'CYMEQREGULATOR', 'CYMEQSHUNTCAPACITOR', 'CYMEQSWITCH', 'CYMEQRECLOSER', 'CYMEQBREAKER',
-                'CYMEQFUSE', 'CYMEQSOURCE'}
+                'CYMEQFUSE', 'CYMEQSOURCE', 'CYMEQTRANSFORMER'}
 EQUIPMENT_TABLE = {1: ('CableId', 'CYMEQCABLE'), 2: ('LineId', 'CYMEQOVERHEADLINE'),
                    23: ('LineId', 'CYMEQOVERHEADLINEUNBALANCED'), 4: ('EquipmentId', 'CYMEQREGULATOR'),
-                   8: ('EquipmentId', 'CYMEQBREAKER'), 10: ('EquipmentId', 'CYMEQRECLOSER'),
+                   5: ('EquipmentId', 'CYMEQTRANSFORMER'), 8: ('EquipmentId', 'CYMEQBREAKER'), 10: ('EquipmentId', 'CYMEQRECLOSER'),
                    13: ('EquipmentId', 'CYMEQSWITCH'), 14: ('EquipmentId', 'CYMEQFUSE'),
                    17: ('EquipmentId', 'CYMEQSHUNTCAPACITOR')}
 
@@ -119,6 +119,11 @@ class Project:
         self.devices = defaultdict(list)
         for row in t.get('CYMSECTIONDEVICE', []):
             self.devices[row['SectionId']].append(row)
+        # Forma del tramo: CYMINTERMEDIATEPOINT, PointIndex desde 0 de From a To, sin los extremos.
+        self.points = defaultdict(list)
+        for row in t.get('CYMINTERMEDIATEPOINT', []):
+            if row.get('X') is not None and row.get('Y') is not None:
+                self.points[(row.get('NetworkId'), row['SectionId'])].append(row)
         self.nodes = {}
         for row in t.get('CYMNODE', []):
             self.nodes.setdefault(row['NodeId'], row)
@@ -134,8 +139,11 @@ class Project:
                      'number': d['DeviceNumber'],
                      'location': LOCATIONS.get(d['Location'], 'To'), **self._device_state(d)}
                     for d in self.devices.get(sid, [])]
+            points = sorted(self.points.get((sec['NetworkId'], sid), []) or self.points.get((None, sid), []),
+                            key=lambda r: r['PointIndex'])
             sections.append({'id': sid, 'network': sec['NetworkId'], 'from': sec['FromNodeId'], 'to': sec['ToNodeId'],
-                             'phases': PHASES.get(sec['Phase'], ''), 'devices': devs})
+                             'phases': PHASES.get(sec['Phase'], ''), 'devices': devs,
+                             'points': [{'x': r['X'], 'y': r['Y']} for r in points]})
         sources = [{'id': r['DeviceNumber'], 'network': r['NetworkId'], 'node': r['NodeId']}
                    for r in self.tables.get('CYMSOURCE', [])]
         xs = [n['x'] for n in nodes] or [0]
@@ -151,6 +159,9 @@ class Project:
                     projected = [_utm_to_mercator(n['x'], n['y'], zone, epsg >= 32700) for n in nodes]
                     for n, (mx, my) in zip(nodes, projected):
                         n['mx'], n['my'] = mx, my
+                    for sec in sections:
+                        for q in sec['points']:
+                            q['mx'], q['my'] = _utm_to_mercator(q['x'], q['y'], zone, epsg >= 32700)
                     if projected:
                         map_bounds = [min(p[0] for p in projected), min(p[1] for p in projected),
                                       max(p[0] for p in projected), max(p[1] for p in projected)]

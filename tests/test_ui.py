@@ -62,6 +62,22 @@ class ServiceTests(unittest.TestCase):
         self.assertIsNone(geo['map_bounds'])
         self.assertTrue(all('mx' not in n for n in geo['nodes']))
 
+    def test_section_points_follow_point_index_and_project_to_map(self):
+        # CYMINTERMEDIATEPOINT: forma del tramo de From a To; se ordena por PointIndex y se filtra por red.
+        for row in self.project.nodes.values():
+            row['X'], row['Y'] = 500000 + row['X'], 7200000 + row['Y']
+        self.project.tables['CYMINTERMEDIATEPOINT'] = [
+            {'SectionId': 's1', 'PointIndex': 1, 'NetworkId': 'N', 'X': 500600.0, 'Y': 7200100.0},
+            {'SectionId': 's1', 'PointIndex': 0, 'NetworkId': 'N', 'X': 500300.0, 'Y': 7200050.0},
+            {'SectionId': 's1', 'PointIndex': 0, 'NetworkId': 'OTRA', 'X': 1.0, 'Y': 1.0},
+            {'SectionId': 's2', 'PointIndex': 0, 'NetworkId': 'N', 'X': None, 'Y': 7200000.0}]
+        self.project._index()
+        geo = self.project.geometry()
+        points = {s['id']: s['points'] for s in geo['sections']}
+        self.assertEqual([(q['x'], q['y']) for q in points['s1']], [(500300.0, 7200050.0), (500600.0, 7200100.0)])
+        self.assertEqual(points['s2'], [])
+        self.assertTrue(all('mx' in q and 'my' in q for q in points['s1']))
+
     def test_properties_decode_verified_codes_only(self):
         props = self.project.properties('section', 's1')
         reg = next(g for g in props['groups'] if g['name'] == 'Regulator R1')
