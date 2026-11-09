@@ -344,6 +344,23 @@ class Project:
             save(output, provenance, schemas, self.tables, model, validate(model))
         return str(Path(output).resolve())
 
+    # --- Estudios CYME (.sxst) ------------------------------------------------------------
+    def export_info(self, search=()):
+        """Si el proyecto se puede exportar por ida y vuelta y desde qué estudio."""
+        from ..sxst_export import ExportError, locate_study
+        try:
+            path, origin = locate_study(self.info['provenance'], search=search)
+        except ExportError as exc:
+            return {'available': False, 'reason': str(exc)}
+        return {'available': True, 'study': str(path), 'networks': origin.get('network_ids'),
+                'pending_edits': len(self.editor.journal), 'suggested_name': self.path.name.replace('.nandu.sqlite', '')}
+
+    def export_sxst(self, output, search=()):
+        """Estudio CYME con la red tal como está (ediciones sin guardar incluidas); el original no cambia."""
+        from ..sxst_export import export
+        with self.lock:
+            return export(self.tables, self.info['provenance'], output, search=search, journal=self.editor.journal)
+
     # --- Cálculos -------------------------------------------------------------------------
     def _model(self):
         if self.model is None:

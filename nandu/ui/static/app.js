@@ -1335,6 +1335,69 @@ async function saveAs() {
   } catch (e) { busy(false); status('Error: ' + e.message); alert(e.message); }
 }
 
+/* ---------------- Estudios CYME (.sxst) ---------------- */
+async function importStudy() {
+  let input = null;
+  const picked = await formDialog('Import CYME Study (.sxst)', `<div class="kv">
+    <span>Study file</span><input type="file" name="sxst" accept=".sxst" required></div>
+    <p class="note">A copy of the study is kept in the data folder (studies) as the base for a later export. The file you pick is not modified.</p>`,
+  (body) => { input = $('[name=sxst]', body); });
+  const file = picked && input && input.files[0];
+  if (!file) return;
+  busy(true, `Reading ${file.name}...`);
+  let study;
+  try {
+    const res = await fetch('/api/sxst-upload?name=' + encodeURIComponent(file.name),
+      { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: file });
+    study = await res.json();
+    if (!res.ok) throw new Error(study.error || res.statusText);
+  } catch (e) { busy(false); status('Error: ' + e.message); alert(e.message); return; }
+  busy(false);
+  let body = null;
+  const nets = study.networks.map((n) => `<label class="check"><input type="checkbox" name="net" value="${esc(n.id)}" checked> ${esc(n.id)} <span class="count">(${n.sections} sections)</span></label>`).join('');
+  const values = await formDialog('Import CYME Study (.sxst)', `<div class="kv">
+    <span>Study</span><span>${esc(file.name)} (${fmt(study.bytes / 1048576, 1)} MB)</span>
+    <span>Networks</span><div class="nets">${nets || '<i>no sections</i>'}</div>
+    <span>Project name</span><input name="name" value="${esc(study.suggested_name)}" size="40">
+    <span></span><span>.nandu.sqlite in the data folder</span></div>
+    <p class="note">The importer reads what the calculations need; the export later writes back only the changes, on top of this study.</p>`,
+  (b) => { body = b; });
+  if (!values) return;
+  const networks = $$('[name=net]', body).filter((c) => c.checked).map((c) => c.value);
+  if (!networks.length) { alert('Select at least one network'); return; }
+  busy(true, 'Importing study...');
+  try {
+    const result = await api('sxst-import', { study: study.study, networks, name: values.name.trim() });
+    busy(false);
+    await openFile(result.file);
+    status(`Imported ${result.networks.join(', ')} from ${file.name}${result.issue_count ? ` - ${result.issue_count} import issues (see Messages after a run)` : ''}`);
+  } catch (e) { busy(false); status('Error: ' + e.message); alert(e.message); }
+}
+
+async function exportStudy() {
+  if (!S.file) return;
+  let info;
+  try { info = await api('sxst-export-info?file=' + encodeURIComponent(S.file)); } catch (e) { alert(e.message); return; }
+  if (!info.available) { status('Export not available for this project'); alert(info.reason); return; }
+  const values = await formDialog('Export CYME Study (.sxst)', `<div class="kv">
+    <span>Base study</span><span title="${esc(info.study)}">${esc(info.study.split(/[\\/]/).pop())}</span>
+    <span>Networks</span><span>${esc((info.networks || []).join(', '))}</span>
+    <span>Unsaved edits</span><span>${info.pending_edits} (included)</span>
+    <span>File name</span><input name="name" value="${esc(info.suggested_name)}-export" size="40">
+    <span></span><span>.sxst in data\\exports, also downloaded</span></div>
+    <p class="note">Round trip: the original study is copied unchanged and only the differences with this project (network edits, meter readings) are written into it. Anything Ñandu does not model stays as it was. The export is refused, with the list of changes, if a change has no verified place in the CYME file; the result is re-imported and checked before it is written.</p>`);
+  if (!values) return;
+  busy(true, 'Exporting study...');
+  try {
+    const rep = await api('sxst-export', { file: S.file, name: values.name.trim() });
+    busy(false);
+    const link = document.createElement('a');
+    link.href = '/api/download?name=' + encodeURIComponent(rep.name); link.download = rep.name;
+    document.body.append(link); link.click(); link.remove();
+    status(`Exported ${rep.name}: ${rep.change_count} changes written, verified by re-import`);
+  } catch (e) { busy(false); status('Error: ' + e.message); alert(e.message); }
+}
+
 /* ---------------- Menús y acciones ---------------- */
 function action(name) {
   switch (name) {
@@ -1350,6 +1413,8 @@ function action(name) {
     case 'dialog-estimate': openAnalysis('estimate'); break;
     case 'dialog-allocate': openAnalysis('allocate'); break;
     case 'save-as': saveAs(); break;
+    case 'import-sxst': importStudy(); break;
+    case 'export-sxst': exportStudy(); break;
     case 'toggle-edit': toggleEdit(); break;
     case 'undo': undo(); break;
     case 'delete-selection':

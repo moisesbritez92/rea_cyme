@@ -223,3 +223,7 @@ body.edit-mode #viewWrap { outline: 2px solid #f2b705; outline-offset: -2px; }
 .dlg-body table.meters { margin-top: 6px; width: 100%; }
 .dlg-body table.meters td { white-space: nowrap; }
 .modified { color: var(--warn); }
+.dlg-body .nets { max-height: 160px; overflow: auto; border: 1px solid #d3d7de; padding: 2px 5px; }
+.dlg-body label.check { display: block; white-space: nowrap; }
+.dlg-body label.check .count { color: var(--muted); }
+.dropdown hr { border: 0; border-top: 1px solid #d3d7de; margin: 3px 0; }

@@ -106,10 +106,30 @@ def _is_number(value):
         return False
 
 
+def networks(path):
+    """Redes de un .sxst (OwnerID de sus tramos) con su número de tramos, sin importar nada."""
+    counts, root_tag = {}, None
+    for event, el in ET.iterparse(Path(path).resolve(strict=True), events=('start', 'end')):
+        if event == 'start':
+            root_tag = root_tag or el.tag
+            continue
+        if el.tag == 'Section':
+            owner = _text(el, 'OwnerID')
+            counts[owner] = counts.get(owner, 0) + 1
+            el.clear()
+    if root_tag != 'Cyme':
+        raise ValueError('No es un estudio CYME (.sxst)')
+    return [{'id': k, 'sections': v} for k, v in sorted(counts.items())]
+
+
 def read(path, network_ids=None, load_model_id='1'):
     """Lee un .sxst y devuelve (tablas tipo Access, informe de importación)."""
     path = Path(path).resolve(strict=True)
-    root = ET.parse(path).getroot()
+    return read_root(ET.parse(path).getroot(), network_ids, load_model_id)
+
+
+def read_root(root, network_ids=None, load_model_id='1'):
+    """Como read(), sobre un árbol ya leído (el exportador verifica su salida sin pasar por disco)."""
     if root.tag != 'Cyme':
         raise ValueError('No es un estudio CYME (.sxst)')
     wanted = set(network_ids or [])

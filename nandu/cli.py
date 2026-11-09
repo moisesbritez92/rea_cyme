@@ -5,7 +5,7 @@ from pathlib import Path
 
 from . import __version__
 from .cyme_import import import_database, list_networks
-from .storage import inspect, load_tables, save_json
+from .storage import inspect, load_source, load_tables, save_json
 from .topology import TABLES, analyze, summarize
 from . import cyme_model
 from . import electrical
@@ -29,6 +29,11 @@ def main(argv=None):
     tables = commands.add_parser('import-tables', help='Importar tablas tipo CYME de un JSON (nandu-cyme-tables-v1)')
     tables.add_argument('--tables', required=True)
     tables.add_argument('--output', required=True)
+    exporting = commands.add_parser('export-sxst', help='Exportar un proyecto importado de .sxst a un estudio CYME '
+                                                        '(ida y vuelta sobre el estudio original)')
+    exporting.add_argument('file')
+    exporting.add_argument('--output', required=True)
+    exporting.add_argument('--study', help='Estudio original, si se movió (se verifica su SHA-256)')
     inspection = commands.add_parser('inspect', help='Consultar una importación sin CYME ni Access')
     inspection.add_argument('file')
     topology = commands.add_parser('topology', help='Analizar conectividad condicional por fase')
@@ -103,6 +108,16 @@ def main(argv=None):
                 return 2
             # Convergió, pero se excluyó del cálculo algo que CYME sí calcula: no es un estudio completo.
             return 3 if report['model_coverage']['status'] == 'incomplete' else 0
+        if args.command == 'export-sxst':
+            from .sxst_export import export
+            report_path = Path(args.output + '.json')
+            if report_path.exists():
+                raise FileExistsError(f'El destino ya existe: {report_path}')
+            report = export(load_source(args.file)[1], inspect(args.file)['provenance'], args.output,
+                            study=args.study, search=[Path(args.file).resolve().parent / 'studies'])
+            save_json(report_path, report)
+            print(json.dumps({**report, 'report_file': str(report_path)}, indent=2, ensure_ascii=False))
+            return 0
         if args.command == 'import-sxst':
             from .sxst_import import import_study
             result = import_study(args.study, args.output, args.networks)

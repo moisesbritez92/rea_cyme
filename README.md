@@ -2,7 +2,7 @@
 
 Software para modelar y analizar redes eléctricas de distribución.
 
-## Versión actual: 0.14.0
+## Versión actual: 0.15.0
 
 Reimplementación independiente de CYME 9.0 para redes de distribución. Importa
 bases Access y estudios `.sxst` de CYME a un archivo SQLite propio, conserva las
@@ -18,7 +18,8 @@ cargas, catálogos y lecturas de medidores). No necesita CYME para calcular.
 
 Desde 0.14.0 importa también tablas CYME desde JSON (`import-tables`), con lo que se armó una
 base estructural del SIN (500/220/66/23 kV) a partir del esquema unifilar: topología y
-maniobras, todavía sin parámetros eléctricos.
+maniobras, todavía sin parámetros eléctricos. Desde 0.15.0 importa y exporta estudios `.sxst`
+desde la interfaz; el export es de ida y vuelta sobre el estudio original y solo escribe la red.
 
 **Alcance demostrado y límites.** El flujo se contrastó con CYME en dos
 alimentadores (CZU06/CZU08): 2.690 tensiones, 11,2 V de diferencia máxima. Es un
@@ -1067,3 +1068,79 @@ existente, transformador que conduce e interruptor abierto que corta, transforma
 `Status` ≠ 0 excluido, y rechazo de formato, valores no escalares o no finitos y convenciones
 sin autoridad. La sexta (`test_ui`): puntos intermedios ordenados por `PointIndex`, filtrados por red y
 proyectados al mapa.
+## Importar y exportar estudios CYME (.sxst) — 0.15.0
+
+**Botones Import .sxst y Export .sxst** en la barra de herramientas, y en el menú File: *Import CYME
+Study (.sxst)...* y *Export CYME Study (.sxst)...*.
+
+- **Importar.** Se elige el `.sxst` en el navegador. El servidor guarda una copia inmutable en
+  `data\studies\<nombre>-<sha256[:12]>.sxst`; si ya existe la misma copia, se reutiliza. Se muestran
+  las redes del estudio con su número de tramos para elegir cuáles importar. El proyecto nuevo
+  (`data\<nombre>.nandu.sqlite`, sin reemplazar uno existente) se abre al terminar. Es el mismo
+  importador de `import-sxst`.
+- **Exportar** (ida y vuelta, solo proyectos que vienen de un `.sxst`). El estudio original es la
+  base:
+  1. Se relee con el importador y se compara con las tablas actuales del proyecto, ediciones sin
+     guardar incluidas.
+  2. Cada diferencia se escribe sobre los bytes originales: expat da la posición de cada elemento.
+     Todo lo que Ñandu no modela queda idéntico: etiquetas, protecciones, catálogos sin uso,
+     parámetros de estudio, otros modelos de carga, redes no importadas, comentarios, CRLF.
+  3. El resultado va a `data\exports\<nombre>.sxst` con un informe `.sxst.json` (base con su
+     SHA-256, cambios escritos, verificación) y además se descarga en el navegador.
+- **CLI**: `nandu export-sxst <proyecto> --output <x.sxst> [--study <original.sxst>]`.
+
+El estudio original se busca por su SHA-256: primero en la ruta de la procedencia y después en
+`data\studies`. Un proyecto guardado con Save As sigue su cadena `derived_from` hasta el `.sxst`.
+Si el original se movió, se indica con `--study`; si cambió, el export se rechaza.
+
+**Qué se escribe.** Las escrituras son las inversas exactas del importador:
+- tramos: fase; nodos: X, Y; ubicación del equipo en el tramo;
+- líneas y cables: longitud, conductor, cables en paralelo, estado;
+- maniobras: equipo, ClosedPhase, NormalStatus (`SwitchStatusEnum`: Closed/Open), nodo de alimentación,
+  estado;
+- reguladores: conexión, modo, taps, PT, CT, boost/buck, centro de carga;
+- capacitores: conexión, kVLN, kvar fijos y conmutados;
+- cargas: conexión, tipo de cliente, estado, bloqueo de Load Allocation (`Locked`/`Unlocked` en el
+  modelo de carga), fase, kVA conectado, kWh, número de clientes, y kW/kvar en el tipo propio de cada
+  `LoadValue` (KW_KVAR directo; KVA_PF y KW_PF con la inversa de `sxst_import.load_value`);
+- lecturas A-FP de medidores;
+- campos de catálogo.
+
+Los números conservan el formato del valor original: entero si lo era, y si no con sus decimales
+(6 en CYME).
+
+**Altas y bajas.** Borrar tramos, equipos y nodos quita sus elementos. No se quita un nodo que
+todavía usa un tramo de una red no importada. Un tramo, nodo o equipo nuevo copia el primer elemento
+del mismo tipo de la red, que es la plantilla de la edición de 0.12.0, y reemplaza lo que Ñandu
+conoce. Una carga nueva conserva solo el modelo de carga 1, con un cliente y un valor por fila.
+
+**Reglas que no se rompen.**
+- Un cambio sin escritura definida se rechaza con la lista de problemas y no se escribe nada. Por
+  ejemplo: tablas que no se editan (fuentes, clases de consumidor), columnas que el XML no tiene,
+  códigos sin texto CYME verificado, altas de catálogo o de medidor.
+- Antes de escribir, la salida se vuelve a importar y tiene que reproducir las tablas del proyecto,
+  con tolerancia de redondeo de 1e-5 + 1e-6·|x|. Si no, no se escribe.
+- No se exportan resultados (cargas de Load Allocation o del estimador): solo la red.
+
+Los proyectos importados de Access todavía no se exportan: no hay XML original y generarlo inventaría
+los datos que CYME espera.
+
+Verificación: **153 pruebas correctas**. Ocho son nuevas (`tests/test_sxst_export.py`), sobre un
+`.sxst` mínimo con la forma real (CRLF, comentarios, `xsi:type`, cargas KW_KVAR y KVA_PF, medidor,
+regulador, seccionador, catálogos y una red no importada):
+- un proyecto sin cambios se exporta idéntico byte a byte;
+- diez ediciones de campos escritas en su lugar, sin tocar el resto;
+- baja de tramo, tramo y nodo nuevos, carga y seccionadores nuevos, con plantillas;
+- el estudio exportado da el mismo flujo de carga que el proyecto;
+- rechazos sin archivo de salida;
+- base movida, cambiada o encontrada por SHA-256, cadena de Save As y destino existente;
+- por HTTP: subir, importar, editar, exportar y descargar;
+- rechazos con la lista de problemas y nombres fuera de las carpetas.
+
+Sobre `czu06-czu08-sxst-20261006` (estudio `lf-czu-20261006-01`, 4,4 MB):
+- **Sin cambios**: el export sale idéntico byte a byte, en 0,7 s.
+- **Con ediciones** (carga, tap, medidor, baja de un tramo de CZU08 y un tramo nuevo con nodo, carga,
+  seccionador, capacitor y regulador): pasa la verificación, con redondeo máximo de 2,5e-7.
+
+Falta abrir un `.sxst` exportado en CYME (puente del MCP) y comparar su flujo con el de Ñandu.
+
