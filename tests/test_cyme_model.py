@@ -143,6 +143,32 @@ class ExclusionAtomicityTests(unittest.TestCase):
         self.assertFalse([b for b in model['buses'] if b == 'n2' or b.startswith('s2#')])
         self.assertEqual([s['id'] for s in model['sections']], ['s1'])
 
+    def test_unmodeled_device_is_reported_by_name(self):
+        t = tables()
+        t['CYMSECTIONDEVICE'].append({'NetworkId': 'N', 'SectionId': 's2', 'DeviceNumber': 'T3',
+                                      'DeviceType': 39, 'Location': 0})
+        model = cyme_model.build(t)
+        self.assertEqual(model['issues'][0]['code'], 'section_excluded')
+        self.assertIn('ThreeWindingTransformer (39)', model['issues'][0]['reason'])
+        self.assertEqual(cyme_model.coverage(model)['status'], 'incomplete')
+
+    def test_distributed_load_rows_are_not_added_to_a_spot_load(self):
+        t = tables(connection=0, load_phase=1)
+        t['CYMCUSTOMERLOAD'].append({**t['CYMCUSTOMERLOAD'][0], 'CustomerNumber': 'D1', 'DeviceType': 21})
+        model = cyme_model.build(t)
+        self.assertEqual([l['customer'] for l in model['loads']], ['C1'])
+        issue = next(i for i in model['issues'] if i['code'] == 'customer_load_excluded')
+        self.assertIn('DistributedLoad', issue['reason'])
+
+    def test_sectionalizer_switches_like_other_devices(self):
+        t = tables()
+        t['CYMSECTIONDEVICE'].append({'NetworkId': 'N', 'SectionId': 's2', 'DeviceNumber': 'SEC',
+                                      'DeviceType': 12, 'Location': 1})
+        t['CYMSECTIONALIZER'] = [{'NetworkId': 'N', 'DeviceNumber': 'SEC', 'Status': 0, 'ClosedPhase': 7}]
+        model = cyme_model.build(t)
+        self.assertFalse([i for i in model['issues'] if i['code'] == 'section_excluded'])
+        self.assertEqual(cyme_model.CONVENTIONS['device_types']['value'][12], 'Sectionalizer')
+
     def test_failed_delta_branch_drops_the_whole_customer_row(self):
         model = cyme_model.build(tables(connection=2, load_phase=4, section_phase=4))
         self.assertEqual(model['loads'], [])

@@ -7,10 +7,10 @@ from collections import Counter, defaultdict
 import cmath
 import math
 
-from .topology import PHASES
+from .topology import DEVICE_NAMES, PHASES
 
 ABC = 'ABC'
-SWITCHING = {8: 'CYMBREAKER', 10: 'CYMRECLOSER', 13: 'CYMSWITCH', 14: 'CYMFUSE'}
+SWITCHING = {8: 'CYMBREAKER', 10: 'CYMRECLOSER', 12: 'CYMSECTIONALIZER', 13: 'CYMSWITCH', 14: 'CYMFUSE'}
 LINES = {
     1: ('CYMUNDERGROUNDLINE', 'CableId', 'CYMEQCABLE', 'sequence'),
     2: ('CYMOVERHEADLINE', 'LineId', 'CYMEQOVERHEADLINE', 'sequence'),
@@ -82,7 +82,19 @@ CONVENTIONS['identity'] = {
              'si se repiten, se excluyen todos los implicados',
     'authority': 'hypothesis',
     'evidence': 'la importación Access incorpora nodos de otra red citados por extremos de tramos (README, '
-                'Procedencia); no se conoce semántica CYME para identificadores repetidos'}
+                'Procedencia). Base de prueba del 9 nov. 2026: al importar casos con NodeId repetidos CYME los '
+                'fusionó en un nodo compartido (NetworkId nulo y una fila de CYMNODEINTER por red). La ayuda de '
+                'Database > Import dice que CYME no admite SectionId repetidos ni en redes distintas'}
+CONVENTIONS['device_types'] = {
+    'value': {code: name for code, name in sorted(DEVICE_NAMES.items())},
+    'authority': 'verified',
+    'evidence': 'CYMSECTIONDEVICE.DeviceType frente a la etiqueta del .sxst, equipo por equipo: tutoriales de '
+                'CYME (Samples) y bases de prueba bd_pruebas/bd_nuevo (data/cyme-codigos-20261109); '
+                '47/48 comparten tabla con 5/39 y 21 con 20 (docs/cyme-ingenieria-inversa.md)'}
+CONVENTIONS['normal_status'] = {
+    'value': {0: 'Open', 1: 'Closed'}, 'authority': 'verified',
+    'evidence': 'Tutorial_with_cascaded_substations: los 58 NormalStatus=Open del .sxst son los 58 con 0 en '
+                'Access. El cálculo usa ClosedPhase (estado actual), no NormalStatus'}
 CONTROL_MODES = {0: 'load_center', 1: 'rx', 2: 'fixed', 3: 'terminal', 4: 'fixed'}
 
 
@@ -425,7 +437,9 @@ def build(tables, network_ids=None, include_line_charging=True):
                 elif code == 17:
                     shunts.append(('capacitor', number, location))
                 else:
-                    raise ValueError(f'{number}: tipo de dispositivo {att.get("DeviceTypeText") or code} no modelado')
+                    name = att.get('DeviceTypeText') or DEVICE_NAMES.get(code)
+                    label = f'{name} ({code})' if name and code is not None else name or code
+                    raise ValueError(f'{number}: tipo de dispositivo {label} no modelado')
             # Cadena física del tramo: extremos, dispositivos y la línea partida si hay cargas al medio.
             chain = series['from'][:]
             mid_needed = any(loc == 'middle' for _, _, loc in shunts) or series['middle']
@@ -503,6 +517,10 @@ def build(tables, network_ids=None, include_line_charging=True):
                    'customer': row.get('CustomerNumber'), **_row_power(row)}
         row_elements = []
         try:
+            if row.get('DeviceType', 20) != 20:
+                # CYMCUSTOMERLOAD repite el tipo de su carga; solo SpotLoad (20) tiene modelo.
+                code = row.get('DeviceType')
+                raise ValueError(f'carga {DEVICE_NAMES.get(code, code)} no modelada')
             if not place:
                 raise ValueError('carga sin tramo admitido')
             if row.get('Status') != 0:

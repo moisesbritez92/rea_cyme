@@ -227,3 +227,6 @@ body.edit-mode #viewWrap { outline: 2px solid #f2b705; outline-offset: -2px; }
 .dlg-body label.check { display: block; white-space: nowrap; }
 .dlg-body label.check .count { color: var(--muted); }
 .dropdown hr { border: 0; border-top: 1px solid #d3d7de; margin: 3px 0; }
+.seg { display: inline-flex; }
+.seg .tb + .tb { margin-left: -1px; }
+.tb:disabled { opacity: .45; cursor: default; }

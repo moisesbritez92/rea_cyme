@@ -20,9 +20,10 @@ LOCATION = {'Middle': 0, 'From': 1, 'To': 2}
 CONNECTION = {'Yg': 0, 'Y': 1, 'D': 2, 'OpenDelta': 3, 'ClosedDelta': 4}
 SETTING = {'LoadCenter': 0, 'RXSettings': 1, 'FixedTap': 2, 'Terminal': 3, 'FixedTapPrimary': 4, 'PythonScript': 5}
 STATUS = {'Connected': 0, 'Disconnected': 1}
-DEVICE_CODE = {'Underground': 1, 'OverheadLine': 2, 'Regulator': 4, 'Breaker': 8, 'Recloser': 10, 'Switch': 13,
-               'Fuse': 14, 'ShuntCapacitor': 17, 'SpotLoad': 20, 'OverheadLineUnbalanced': 23}
-SWITCH_TABLE = {'Breaker': 'CYMBREAKER', 'Recloser': 'CYMRECLOSER', 'Switch': 'CYMSWITCH', 'Fuse': 'CYMFUSE'}
+DEVICE_CODE = {'Underground': 1, 'OverheadLine': 2, 'Regulator': 4, 'Breaker': 8, 'Recloser': 10, 'Sectionalizer': 12,
+               'Switch': 13, 'Fuse': 14, 'ShuntCapacitor': 17, 'SpotLoad': 20, 'OverheadLineUnbalanced': 23}
+SWITCH_TABLE = {'Breaker': 'CYMBREAKER', 'Recloser': 'CYMRECLOSER', 'Sectionalizer': 'CYMSECTIONALIZER',
+                'Switch': 'CYMSWITCH', 'Fuse': 'CYMFUSE'}
 SEQUENCE_FIELDS = {'PositiveSequenceResistance': 'PositiveSequenceResistance',
                    'PositiveSequenceReactance': 'PositiveSequenceReactance',
                    'ZeroSequenceResistance': 'ZeroSequenceResistance', 'ZeroSequenceReactance': 'ZeroSequenceReactance',
@@ -137,6 +138,7 @@ def read_root(root, network_ids=None, load_model_id='1'):
                                'CYMEQUIVALENTSOURCE', 'CYMHEADNODE', 'CYMNETWORKMETER', 'CYMREGULATOR', 'CYMLOAD',
                                'CYMCUSTOMERLOAD', 'CYMCONSUMERCLASS', 'CYMSHUNTCAPACITOR', 'CYMOVERHEADLINE',
                                'CYMOVERHEADLINEUNBALANCED', 'CYMUNDERGROUNDLINE', 'CYMDBPARAMETERS', 'CYMLDCSETTINGS',
+                               'CYMNODECONNECTOR', 'CYMBUSDISPLAY', 'CYMSECTIONNODE', 'CYMINTERMEDIATEPOINT',
                                *SWITCH_TABLE.values())}
     t.update(_catalogs(root))
     unsupported, issues = {}, []
@@ -198,6 +200,18 @@ def read_root(root, network_ids=None, load_model_id='1'):
         t['CYMSECTION'].append(row)
         owner_of_node.setdefault(row['FromNodeId'], net)
         owner_of_node.setdefault(row['ToNodeId'], net)
+        # Forma del tramo: IntermediatePoints en orden From -> To; en Access PointIndex desde 0.
+        shape = sec.find('IntermediatePoints')
+        for index, q in enumerate(shape.findall('Point') if shape is not None else []):
+            t['CYMINTERMEDIATEPOINT'].append({'NetworkId': net, 'SectionId': sid, 'PointIndex': index,
+                                              'X': _num(q, 'X'), 'Y': _num(q, 'Y')})
+        # Terciario del transformador de tres devanados: en Access va en CYMSECTIONNODE (verificado).
+        tertiary = _text(sec, 'TertiaryNodeID')
+        if tertiary:
+            t['CYMSECTIONNODE'].append({'SectionId': sid, 'NodeId': tertiary,
+                                        'NodeConnectorIndex': _int(_text(sec, 'TertiaryNodeConnectorIndex', '0')),
+                                        'BreakPointIndex': _int(_text(sec, 'TertiaryBreakpointIndex', '-1'))})
+            owner_of_node.setdefault(tertiary, net)
         devices = sec.find('Devices')
         for dev in (devices if devices is not None else []):
             code = DEVICE_CODE.get(dev.tag)
@@ -276,10 +290,22 @@ def read_root(root, network_ids=None, load_model_id='1'):
         ident = _text(node, 'NodeID')
         if ident not in used:
             continue
-        point = node.find('Connectors/Point')
-        t['CYMNODE'].append({'NetworkId': owner_of_node[ident], 'NodeId': ident,
+        net = owner_of_node[ident]
+        points = node.findall('Connectors/Point')
+        point = points[0] if points else None
+        t['CYMNODE'].append({'NetworkId': net, 'NodeId': ident,
                              'X': _num(point, 'X') if point is not None else None,
                              'Y': _num(point, 'Y') if point is not None else None})
+        # Como en Access: X/Y del nodo = primer punto; CYMNODECONNECTOR solo si hay más de uno,
+        # con ConnectorIndex = orden del punto; CYMBUSDISPLAY = BusDisplay (IEEE 14/118, 282 nodos).
+        if len(points) > 1:
+            for index, q in enumerate(points):
+                t['CYMNODECONNECTOR'].append({'NetworkId': net, 'NodeId': ident, 'ConnectorIndex': index,
+                                              'X': _num(q, 'X'), 'Y': _num(q, 'Y')})
+        display = node.find('BusDisplay')
+        if display is not None:
+            t['CYMBUSDISPLAY'].append({'NetworkId': net, 'NodeId': ident,
+                                       **{k: _num(display, k) for k in ('X1', 'Y1', 'X2', 'Y2', 'Width')}})
     for cc in root.iter('ConsumerClass'):
         t['CYMCONSUMERCLASS'].append({
             'ConsumerClassId': _text(cc, 'Name'),

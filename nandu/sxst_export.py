@@ -24,9 +24,10 @@ from . import __version__, sxst_import
 from .topology import DEVICES
 
 ABC = 'ABC'
-TAG = {1: 'Underground', 2: 'OverheadLine', 4: 'Regulator', 8: 'Breaker', 10: 'Recloser', 13: 'Switch', 14: 'Fuse',
-       17: 'ShuntCapacitor', 20: 'SpotLoad', 23: 'OverheadLineUnbalanced'}
-TABLE_CODE = {table: code for code, (table, _) in DEVICES.items()}
+TAG = {1: 'Underground', 2: 'OverheadLine', 4: 'Regulator', 8: 'Breaker', 10: 'Recloser', 12: 'Sectionalizer',
+       13: 'Switch', 14: 'Fuse', 17: 'ShuntCapacitor', 20: 'SpotLoad', 23: 'OverheadLineUnbalanced'}
+# Solo los tipos que se escriben: en DEVICES hay tablas compartidas (CYMLOAD 20/21, CYMTRANSFORMER 5/47).
+TABLE_CODE = {DEVICES[code][0]: code for code in TAG}
 # Textos CYME de los códigos: los mismos diccionarios del importador, invertidos, más enums de cymEnum.ini.
 ENUMS = {'phase': {v: k for k, v in sxst_import.PHASE.items()},
          'location': {v: k for k, v in sxst_import.LOCATION.items()},
@@ -45,7 +46,7 @@ DEVICE_FIELDS = {
     'CYMOVERHEADLINE': LINE, 'CYMOVERHEADLINEUNBALANCED': LINE,
     'CYMUNDERGROUNDLINE': {'Length': ('Length', 'num'), 'CableId': ('CableID', 'text'),
                            'NumberOfCableInParallel': ('NumberOfCableInParallel', 'num'), 'Status': STATUS},
-    'CYMSWITCH': SWITCH, 'CYMBREAKER': SWITCH, 'CYMRECLOSER': SWITCH, 'CYMFUSE': SWITCH,
+    'CYMSWITCH': SWITCH, 'CYMBREAKER': SWITCH, 'CYMRECLOSER': SWITCH, 'CYMFUSE': SWITCH, 'CYMSECTIONALIZER': SWITCH,
     'CYMREGULATOR': {'EquipmentId': ('DeviceID', 'text'), 'ConnectionConfiguration': ('ConnectionConfiguration', 'connection'),
                      'SettingOption': ('SettingOption', 'setting'), 'NormalFeedingNodeId': ('NormalFeedingNodeID', 'text'),
                      'LoadCenterId': ('LoadCenterID', 'text'), 'Status': STATUS,

@@ -12,10 +12,12 @@ import webbrowser
 
 from ..storage import save_json
 from .service import Project
+from . import cyme_symbols
 
 STATIC = Path(__file__).with_name('static')
 NAME = re.compile(r'^[\w.\-]{1,120}\.nandu\.sqlite$')
 STUDY = re.compile(r'^[\w.\-]{1,140}\.sxst$')
+SYMBOLS = {}
 MAX_UPLOAD = 1 << 30  # 1 GiB: los estudios completos de CYME rondan las decenas de MB
 
 
@@ -163,6 +165,11 @@ def handler(state):
                     return self._send(state.import_study(q['study'], q.get('networks'), q['name']))
                 if route == 'download':
                     return self._file(state.download(q['name']))
+                if route == 'symbols':
+                    # Símbolos de la instalación local de CYME (None si no está): se leen una vez por servidor.
+                    if 'value' not in SYMBOLS:
+                        SYMBOLS['value'] = cyme_symbols.load()
+                    return self._send(SYMBOLS['value'])
                 if route == 'files':
                     return self._send({'files': state.files(), 'initial': state.initial})
                 project = state.project(q['file'])

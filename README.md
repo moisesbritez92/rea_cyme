@@ -2,7 +2,7 @@
 
 Software para modelar y analizar redes eléctricas de distribución.
 
-## Versión actual: 0.15.0
+## Versión actual: 0.16.0
 
 Reimplementación independiente de CYME 9.0 para redes de distribución. Importa
 bases Access y estudios `.sxst` de CYME a un archivo SQLite propio, conserva las
@@ -20,6 +20,8 @@ Desde 0.14.0 importa también tablas CYME desde JSON (`import-tables`), con lo q
 base estructural del SIN (500/220/66/23 kV) a partir del esquema unifilar: topología y
 maniobras, todavía sin parámetros eléctricos. Desde 0.15.0 importa y exporta estudios `.sxst`
 desde la interfaz; el export es de ida y vuelta sobre el estudio original y solo escribe la red.
+Desde 0.16.0 reconoce los códigos Access de transformadores de tres devanados, autotransformadores,
+generadores, reactores, SVC y STATCOM, verificados en CYME (todavía sin modelo eléctrico).
 
 **Alcance demostrado y límites.** El flujo se contrastó con CYME en dos
 alimentadores (CZU06/CZU08): 2.690 tensiones, 11,2 V de diferencia máxima. Es un
@@ -1144,3 +1146,181 @@ Sobre `czu06-czu08-sxst-20261006` (estudio `lf-czu-20261006-01`, 4,4 MB):
 
 Falta abrir un `.sxst` exportado en CYME (puente del MCP) y comparar su flujo con el de Ñandu.
 
+
+## Códigos de equipos de transmisión verificados en CYME — 0.16.0
+
+Para cargar el SIN hacían falta los códigos Access de equipos que no aparecen en las bases de
+distribución. Se obtuvieron en CYME 9.0 r4 sin tocar `BD_Centro0926.mdb`:
+- con las bases de los tutoriales (`tutorial\Samples`), que vienen en Access y en `.sxst`;
+- con dos bases de prueba creadas por el usuario: `bd_pruebas`, con los casos IEEE de tres devanados,
+  14 y 118 barras importados por **Database > Import > CYME XML Self-Contained Files**, y `bd_nuevo`,
+  con un autotransformador, uno de tres devanados, un SVC y un STATCOM agregados a mano.
+
+Cada equipo de Access se cruzó con su etiqueta del `.sxst` por sección y `DeviceNumber`. Las copias
+de las bases, sus SHA-256 y los scripts están en `data/cyme-codigos-20261109/`, y el detalle en
+`docs/cyme-ingenieria-inversa.md`.
+
+| Código | Equipo | Tabla de instancia |
+|---|---|---|
+| 12 | Sectionalizer | `CYMSECTIONALIZER` |
+| 18 | ShuntReactor | `CYMSHUNTREACTOR` |
+| 21 | DistributedLoad | `CYMLOAD` (compartida con SpotLoad, 20) |
+| 36 | SynchronousGenerator | `CYMSYNCHRONOUSGENERATOR` + `CYMSYNCHRONOUSGENERATIONMODEL` |
+| 39 | ThreeWindingTransformer | `CYMTHREEWINDINGTRANSFORMER`; el terciario va en `CYMSECTIONNODE` |
+| 47 | AutoTransformer | `CYMTRANSFORMER` (compartida con Transformer, 5) |
+| 48 | ThreeWindingAutoTransformer | `CYMTHREEWINDINGTRANSFORMER` (compartida con 39) |
+| 49 | SVC | `CYMSVC` + `CYMSVCGENERATIONMODEL` + `CYMUDM` |
+| 62 | STATCOM | `CYMSTATCOM` |
+
+También quedaron verificados `NormalStatus` (0 Open, 1 Closed), `VoltageControlType` del generador
+(0 barra PV, 2 Swing) y las unidades del generador (kV LL, kW, kvar) y del reactor (kvar por fase,
+kV LN). `UserDefinedBaseVoltage` va en kV LL. Desde la consola Python de CYME, `cympy.db.ImportXML`
+hace caer CYME: hay que usar el menú.
+
+**Cambios en Ñandu.**
+- `topology.DEVICE_NAMES` es el único mapa código → nombre; la interfaz lo usa. `DEVICES` incluye los
+  códigos nuevos. Generador, reactor, SVC, STATCOM y carga distribuida son equipos shunt.
+- Las tablas compartidas se distinguen por `DeviceType`: una fila de `CYMTRANSFORMER` con 47 no sirve
+  como instancia de un tramo que dice 5.
+- El transformador de tres devanados une los tres nodos; el terciario sale de `CYMSECTIONNODE`. Una
+  sección sin su fila de terciario, o una fila de terciario en una sección sin ese equipo, se excluye
+  y se informa.
+- El seccionalizador es un equipo de maniobra en `topology`, `cyme_model`, `import-sxst` y
+  `export-sxst`.
+- `cyme_model` informa por nombre los equipos que todavía no modela: el tramo con un
+  `ThreeWindingTransformer (39)` se excluye y la cobertura queda `incomplete`. Las filas de cliente de
+  una carga distribuida (21) no se suman a una carga puntual con el mismo número.
+- `import-cyme` trae las filas de `CYMSECTIONNODE` de las secciones importadas y sus nodos terciarios
+  de frontera.
+- `sxst_export.TABLE_CODE` se arma solo con los tipos que escribe; antes se derivaba de `DEVICES` y
+  se habría roto con las tablas compartidas.
+- Convenciones nuevas en `cyme_model.CONVENTIONS`: `device_types` y `normal_status` (`verified`).
+  `identity` suma la evidencia de que CYME fusiona los `NodeId` repetidos entre redes.
+
+**Dibujo como CYME en la interfaz.**
+- **Barras:** se dibujan desde `CYMBUSDISPLAY` (X1, Y1 – X2, Y2) con el nombre del nodo. Cada tramo sale
+  del punto de su conector (`CYMNODECONNECTOR`, según `From/ToNodeConnectorIndex`), no del centro del nodo.
+- **Símbolos:** transformador (dos círculos), autotransformador (con flecha), tres devanados (tres
+  círculos, con la pata al terciario de `CYMSECTIONNODE`), generador síncrono, reactor shunt, SVC,
+  STATCOM, seccionalizador y carga distribuida.
+- **Tramos de conexión:** en los tramos sin equipo serie (barra → `X-TO`), el generador, la carga o el
+  capacitor van al extremo lejano de la barra, en línea con el tramo.
+- **Escala y zoom:** los símbolos crecen con el zoom, hasta 2,5 veces su tamaño base. El zoom a una barra
+  usa su largo.
+- **Explorador:** tiene grupos para generadores, transformadores, reactores, SVC y STATCOM.
+- **Límite:** una barra con conectores todavía no se arrastra en modo edición, porque la edición solo
+  mueve `CYMNODE.X/Y`.
+
+`import-sxst` trae ahora esa geometría como la guarda Access. Se verificó en 282 nodos de los IEEE 14 y
+118 frente a `bd_pruebas`:
+- `CYMNODE.X/Y` es el primer punto del nodo.
+- `CYMNODECONNECTOR` tiene una fila por punto, con el índice igual al orden, y solo existe en los nodos
+  con más de un punto.
+- `CYMBUSDISPLAY` es el `BusDisplay` del nodo (111 de 111).
+- `TertiaryNodeID` pasa a `CYMSECTIONNODE`.
+- `IntermediatePoints` pasa a `CYMINTERMEDIATEPOINT`, con `PointIndex` desde 0. Coincide en 192 de 192
+  puntos del IEEE 118. Antes no se importaba, y por eso las líneas cruzaban el dibujo en diagonal.
+
+El IEEE 118 importado así se exporta idéntico byte a byte. En una barra sin conectores, el dibujo apoya cada
+tramo en el punto de la barra más cercano a su siguiente punto. Es solo visual: los datos no cambian.
+Tampoco se dibuja el símbolo de un tramo diminuto en pantalla.
+
+**SIN con el dibujo del unifilar** (`data/sin-20261110-v0160.nandu.sqlite`, desde `sin_cyme.json` SHA-256
+`4a8f38dc…`). `eventos_ens/esquema/exportar_cyme.py` escribe ahora, además de la red:
+- Tres devanados con `DeviceType` 39.
+- **Conductores del PDF** (`ESQ_TRAZO`, de `extraido.json`): los segmentos de cada nodo eléctrico tal como
+  están dibujados, en puntos del PDF y, para los nodos de una estación, también en UTM. Los 378 segmentos
+  que no quedaron en ningún nodo ni línea del modelo se guardan como «sin modelo».
+- **Barras** (`CYMBUSDISPLAY` y `ESQ_NODO.Barra*Pdf`): el segmento-barra del dibujo. Antes se usaba el eje
+  del rectángulo del nodo, que quedaba corrido cuando la barra tenía bajadas de un solo lado.
+- **Recorrido de las líneas en el unifilar** (`ESQ_TRAMO_PUNTO`): camino por el conductor de la línea entre
+  los interruptores de sus extremos; con derivaciones, hasta el punto que minimiza la suma de distancias.
+  Una línea de las correcciones que el dibujo reduce a un punto sigue el conductor de ese punto. 185 de 225
+  tramos de línea tienen recorrido; los 40 restantes (líneas `LM` agregadas por las correcciones, sin
+  conductor en el PDF) van rectos y en línea de trazos.
+- **Cabeceras de alimentador** en peine sobre su barra de 23 kV, del lado libre (737). El unifilar no las
+  dibuja; antes caían todas en el centro de la estación y formaban abanicos.
+- **Escala de las estaciones en el mapa: 3 m por punto** del PDF (antes 10). Con 10 se solapaban ACY/CHACY,
+  CLY/VIL, ELK/LIM y VAL/WEX; con 3 ninguna, y una estación mide unos cientos de metros.
+- Rótulos de estación (`ESQ_ROTULO`) y posición de cada equipo (`ESQ_EQUIPO.XPdf/YPdf`).
+
+Resultado: la validación pasa sin errores y ningún tramo queda excluido; 1.850 de 2.008 nodos alcanzados
+desde una central. Todo lo anterior es dibujo: no cambia la topología ni las longitudes.
+
+**Vistas Map y Schematic** (botones de la barra de herramientas y menú View). Son dos dibujos del mismo
+proyecto:
+- *Map*: `CYMNODE` en UTM, las líneas por su trazado y cada estación con su unifilar a escala en su lugar.
+- *Schematic*: el unifilar del PDF. Conductores, barras, interruptores en sus bahías, transformadores,
+  rótulos de estación; en gris lo dibujado que no está en el modelo.
+
+En las dos vistas cada nodo se dibuja con sus conductores, y un tramo de equipo es el símbolo en su
+posición unido al punto más cercano de los conductores de cada lado. La capa de color **Nominal voltage
+(kV)** usa los colores del unifilar (500 azul, 220 rojo, 66 verde, 23 marrón) y es la capa por defecto
+cuando el proyecto declara más de una tensión. Los nodos sin tensión declarada la toman del otro extremo
+de un tramo sin transformador. Los símbolos se achican al alejarse y desaparecen a escala de país. En
+la vista Schematic no se arrastran nodos.
+
+Quedan a la vista dos cosas del esquema, no del dibujo:
+- 13 nodos del PDF unen interruptores de dos estaciones sin ser una línea (N66 ACY–K15, N710 SES–SRO–BSP,
+  N714 CAP–ELA, N94 COV–VAL, N852 COV–CZU, N944 COV–PPE, N316 CEC–VMI2…). En el mapa salen como un tramo
+  recto de interruptor a interruptor. Son las líneas que el esquema todavía no tiene (`sin.md` §5).
+- Los conductores grises de la vista Schematic son lo que el PDF dibuja y el modelo no usa.
+
+**Revisión del trazado geográfico.** Se probó recortar los puntos de trazado dentro de cada estación y se
+descartó: pasaba de 17 a 67 saltos de más de 3 km y de 41 a 54 líneas rectas. De las 225 líneas del
+original:
+- 15 de los 17 saltos de más de 3 km entre el nodo y su trazado van exactamente sobre el trazado del
+  inventario (0 m del geojson): son tramos rectos largos del propio trazado. Las 2 llegadas a MD se
+  apartan hasta 0,8 km porque MD se ubica en el punto de Itaipú.
+- Unas 25 ramas cortas de derivaciones (decenas a cientos de metros) van rectas.
+- 13 líneas no tienen trazado: LM01/LM02 VAL–YZU 500 kV, LM29 MAU–SRI, LM35, LM38, LM40, LM53, LM56,
+  LM61, LM73, LM75, L019 y L101. Tienen un extremo sin estación o el inventario no las une.
+- 55 trazados existentes del inventario no los usa ninguna línea del esquema: IPU–MD 1 a 4, YAC–AYO,
+  COV–PPE, ACY–PFO I, AYO–CBO II, K30–YZU I/II, YZU–COV I, SES–BSP–SRO, LIM–ELK, PBO–BMO, VHA–PBO I,
+  SLO–VAU, VAU–BPA, FIL–MES, PPE–CZA y las ramas `D…`.
+
+Estas dos últimas son faltantes del esquema (`sin.md` §5): hay que confirmarlas con operación antes de
+agregarlas a `correcciones_mimico.yaml`.
+
+**Símbolos de CYME.** `nandu/ui/cyme_symbols.py` lee, de la instalación local de CYME y en el momento, la
+biblioteca vectorial `BaseSymbols.cfg` y la capa «Default Symbols» de `DisplayOptionsDefault.cfg` (símbolo,
+color, tamaño, grosor y trazo por tipo de equipo, estado y fases). Ñandu no copia ni distribuye esos
+archivos; sin CYME instalado (o con `NANDU_CYME_DIR` vacío) la interfaz usa sus propios símbolos.
+- Capa de color **Default (CYME symbols)**, por defecto cuando hay CYME: trifásico verde de grosor 2,
+  monofásico punteado, bifásico a trazos, cable en trazo y punto.
+- Equipos con el símbolo de CYME: transformador de bobinas, tres devanados, autotransformador, generador
+  «G», SVC, STATCOM, fuente equivalente, carga, capacitor, reactor, maniobras.
+- De cerca, puntos intermedios y conectores en rojo, como los muestra CYME.
+- Sin contraste con CYME en pantalla (hipótesis, declaradas en `symbol_basis`): los símbolos internos de
+  CYME con identificador menor de 50000 (interruptor, seccionador, fusible, reconectador, regulador,
+  capacitor y reactor fijos) no están en la biblioteca y se reemplazan por el del mismo tipo y estado; un
+  equipo de maniobra cerrado se dibuja relleno y uno abierto, hueco; el tamaño del símbolo es 0,23 veces el
+  largo típico de barra.
+
+Verificación: **171 pruebas correctas**, dieciocho nuevas:
+- seccionalizador abierto y cerrado;
+- autotransformador frente a transformador en la misma tabla;
+- tres devanados (39 y 48) con y sin terciario, y terciario sin el equipo;
+- equipos shunt de transmisión;
+- equipo no modelado informado por nombre;
+- carga distribuida;
+- `TABLE_CODE`;
+- geometría de barras, conectores y terciario en la interfaz;
+- su importación desde `.sxst`;
+- vista Schematic desde `ESQ_NODO`/`ESQ_EQUIPO`;
+- conductores, recorridos, rótulos y clase de tensión del dibujo de origen;
+- lectura de símbolos y capa por defecto de CYME (`tests/test_cyme_symbols.py`, con archivos sintéticos).
+
+Con datos reales, `import-cyme` + `topology` sobre `bd_nuevo` unen primario, secundario y terciario
+de los dos equipos de tres devanados (`TRANSFO` 2–3–5 y `8` 2–8–`8-T`). Sobre `bd_pruebas` lo hacen
+también con un nodo compartido entre redes. El SHA-256 de las bases no cambió.
+
+**Pendiente** (aparece con los casos IEEE y pesa en transmisión):
+- CYME conecta cada generador, carga, capacitor o STATCOM a la barra con una sección propia, sin
+  equipo en serie (25 generadores y 31 cargas en el IEEE 118). Ñandu excluye esas secciones
+  (`section_without_supported_series_device`).
+- Las barras con varios conectores (`ConnectorIndex` ≠ 0, 272 secciones del IEEE 118) también se
+  excluyen.
+- Las dos semánticas se pueden contrastar con el flujo de CYME sobre los casos IEEE de
+  `tutorial\QATestCase`.
+- Falta además el código 22 de `BD_respaldo_lc.mdb`.

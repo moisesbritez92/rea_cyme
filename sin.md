@@ -65,6 +65,43 @@ Siguen como hipótesis:
 
 ## 2. Tareas que requieren CYME (hacer primero en Windows)
 
+> **Estado al 9 nov. 2026 (Windows, Ñandu 0.16.0).** Hechas las tareas 2.1 a 2.5 (ver la sección
+> 0.16.0 del README y `docs/cyme-ingenieria-inversa.md`):
+> - **Tres devanados:** 39, con el terciario en `CYMSECTIONNODE`.
+> - **Autotransformadores:** 47 en `CYMTRANSFORMER` y 48 en `CYMTHREEWINDINGTRANSFORMER`.
+> - **Otros equipos:** reactor 18, generador 36 (`VoltageControlType` 0 = PV, 2 = Swing), SVC 49,
+>   STATCOM 62 y seccionalizador 12. El 22 sigue sin identificar.
+> - **`UserDefinedBaseVoltage`:** en kV LL. Falta ver si CYME lo usa en los informes en %.
+> - **`NormalStatus`:** 0 = Open, 1 = Closed.
+>
+> Pendientes:
+> - las unidades del catálogo de tres devanados (el equipo `DEFAULT` de un `.sxst` no se importa);
+> - la tarea 2.6 (frecuencia).
+>
+> Para la 2.7, CYME ya trae IEEE 9/14/57/118 en `tutorial\QATestCase`.
+>
+> En `exportar_cyme.py`, poner `DeviceType` 39 a los tres devanados, escribir `CYMSECTIONNODE` y usar
+> 47 para VAL AT01/AT02.
+>
+> Para que la interfaz (0.16.0) dibuje las barras como CYME, el exportador debe escribir:
+> - `CYMBUSDISPLAY` por barra del unifilar (X1, Y1, X2, Y2, Width = largo);
+> - si una barra tiene varias salidas, `CYMNODECONNECTOR` (una fila por punto, con índices desde 0) y el
+>   `From/ToNodeConnectorIndex` de cada tramo.
+>
+> El formato está verificado en `docs/cyme-ingenieria-inversa.md`.
+>
+> **Hecho el 9 y 10 nov. 2026 (Windows):** `exportar_cyme.py` escribe `DeviceType` 39, las barras por su
+> segmento del PDF, los conductores de cada nodo (`ESQ_TRAZO`), el recorrido de las líneas en el unifilar
+> (`ESQ_TRAMO_PUNTO`), las cabeceras de alimentador en peine y las estaciones a 3 m por punto. Detalle en
+> el README (0.16.0). Proyecto: `data/sin-20261110-v0160.nandu.sqlite`. La interfaz tiene las vistas Map y
+> Schematic sobre ese mismo proyecto.
+>
+> El exportador modificado está en `..\0001_GT-DAS\ens\esquema` y hay que llevarlo al repo `eventos_ens`.
+>
+> Faltan en el esquema (se ven en las vistas): 13 nodos del PDF que unen dos estaciones sin ser línea,
+> 40 tramos de línea sin conductor en el dibujo, 13 líneas sin trazado geográfico y 55 trazados del
+> inventario sin línea (§5). Pendiente también: autotransformadores (47).
+
 Seguir las precauciones de `CLAUDE.md`:
 - Trabajar sobre una **copia** de la base o del estudio.
 - Pedir confirmación antes de cualquier herramienta de escritura.

@@ -124,6 +124,32 @@ class SxstTests(unittest.TestCase):
         with self.assertRaises(FileExistsError):
             import_study(self.study, output)
 
+    def test_bus_display_connectors_and_tertiary_follow_access_layout(self):
+        # Como en Access (IEEE 14/118): X/Y = primer punto; CYMNODECONNECTOR solo con más de un punto;
+        # BusDisplay -> CYMBUSDISPLAY; TertiaryNodeID -> CYMSECTIONNODE.
+        text = STUDY.replace(
+            '<Node><NodeID>n1</NodeID><Connectors><Point><X>1000</X><Y>0</Y></Point></Connectors></Node>',
+            '<Node><NodeID>n1</NodeID><Connectors><Point><X>1000</X><Y>0</Y></Point><Point><X>1010</X><Y>0</Y></Point>'
+            '</Connectors><BusDisplay><X1>990</X1><Y1>0</Y1><X2>1020</X2><Y2>0</Y2><Width>30</Width></BusDisplay></Node>'
+            '<Node><NodeID>t</NodeID><Connectors><Point><X>1200</X><Y>50</Y></Point></Connectors></Node>').replace(
+            '<ToNodeID>n2</ToNodeID>', '<ToNodeID>n2</ToNodeID><TertiaryNodeID>t</TertiaryNodeID>'
+            '<TertiaryNodeConnectorIndex>0</TertiaryNodeConnectorIndex><TertiaryBreakpointIndex>-1</TertiaryBreakpointIndex>'
+            '<IntermediatePoints><Point><X>1200</X><Y>10</Y></Point><Point><X>1300</X><Y>10</Y></Point></IntermediatePoints>')
+        self.study.write_text(text, encoding='utf-8')
+        tables, _ = read(self.study)
+        n1 = next(r for r in tables['CYMNODE'] if r['NodeId'] == 'n1')
+        self.assertEqual((n1['X'], n1['Y']), (1000.0, 0.0))
+        self.assertEqual([(r['NodeId'], r['ConnectorIndex'], r['X']) for r in tables['CYMNODECONNECTOR']],
+                         [('n1', 0, 1000.0), ('n1', 1, 1010.0)])
+        self.assertEqual(tables['CYMBUSDISPLAY'], [{'NetworkId': 'N', 'NodeId': 'n1', 'X1': 990.0, 'Y1': 0.0,
+                                                    'X2': 1020.0, 'Y2': 0.0, 'Width': 30.0}])
+        self.assertEqual(tables['CYMSECTIONNODE'], [{'SectionId': 's2', 'NodeId': 't', 'NodeConnectorIndex': 0,
+                                                     'BreakPointIndex': -1}])
+        self.assertIn('t', {r['NodeId'] for r in tables['CYMNODE']})
+        # IntermediatePoints -> CYMINTERMEDIATEPOINT, PointIndex desde 0 de From a To (192 de 192 en el IEEE 118).
+        self.assertEqual([(r['SectionId'], r['PointIndex'], r['X']) for r in tables['CYMINTERMEDIATEPOINT']],
+                         [('s2', 0, 1200.0), ('s2', 1, 1300.0)])
+
     def test_unsupported_series_device_excludes_its_section(self):
         # Un transformador sin modelo no puede desaparecer: el tramo entero queda fuera y se reporta.
         output = Path(self.tmp.name) / 'estudio.nandu.sqlite'

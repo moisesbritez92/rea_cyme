@@ -106,6 +106,15 @@ def study():
     return '\r\n'.join(parts).encode('utf-8')
 
 
+class TableCodeTests(unittest.TestCase):
+    def test_shared_instance_tables_map_to_the_written_type(self):
+        # CYMLOAD también guarda DistributedLoad (21) y CYMTRANSFORMER autotransformadores (47).
+        from nandu.sxst_export import TABLE_CODE, TAG
+        self.assertEqual(TABLE_CODE['CYMLOAD'], 20)
+        self.assertEqual(TABLE_CODE['CYMSECTIONALIZER'], 12)
+        self.assertTrue(set(TABLE_CODE.values()) <= set(TAG))
+
+
 class ExportTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

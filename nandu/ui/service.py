@@ -7,13 +7,11 @@ from pathlib import Path
 import threading
 
 from ..storage import inspect, load_source, save
-from ..topology import DEVICES, PHASES
+from ..topology import DEVICE_NAMES, DEVICES, PHASES
 from .. import cyme_model
 from . import editing
 
 ABC = 'ABC'
-DEVICE_NAMES = {1: 'Underground', 2: 'OverheadLine', 4: 'Regulator', 5: 'Transformer', 8: 'Breaker', 10: 'Recloser',
-                13: 'Switch', 14: 'Fuse', 17: 'ShuntCapacitor', 20: 'SpotLoad', 23: 'OverheadLineUnbalanced'}
 LOCATIONS = {0: 'Middle', 1: 'From', 2: 'To'}
 # Textos de CYME para las conexiones y modos internos del modelo (mismos nombres que DECODE).
 CONNECTION_TEXT = {'wye_grounded': 'Yg', 'delta': 'D', 'closed_delta': 'ClosedDelta'}
@@ -21,12 +19,19 @@ TAP_MODE_TEXT = {'fixed': 'FixedTap', 'load_center': 'LoadCenter', 'rx': 'RXSett
 VOLTAGE_LIMITS = (0.95, 1.05)  # Informe CYME «Buses outside limits»: alguna fase fuera de la banda.
 EXTRA_TABLES = {'CYMNODE', 'CYMNETWORK', 'CYMDBPARAMETERS', 'CYMEQOVERHEADLINE', 'CYMEQCABLE', 'CYMEQOVERHEADLINEUNBALANCED',
                 'CYMEQREGULATOR', 'CYMEQSHUNTCAPACITOR', 'CYMEQSWITCH', 'CYMEQRECLOSER', 'CYMEQBREAKER',
-                'CYMEQFUSE', 'CYMEQSOURCE', 'CYMEQTRANSFORMER'}
+                'CYMEQFUSE', 'CYMEQSOURCE', 'CYMEQTRANSFORMER', 'CYMEQAUTOTRANSFORMER', 'CYMEQTHREEWINDINGTRANSFORMER',
+                'CYMEQTHREEWINDAUTOTRANSFORMER', 'CYMEQSYNCHRONOUSGENERATOR', 'CYMEQSHUNTREACTOR', 'CYMEQSVC',
+                'CYMEQSECTIONALIZER'}
 EQUIPMENT_TABLE = {1: ('CableId', 'CYMEQCABLE'), 2: ('LineId', 'CYMEQOVERHEADLINE'),
                    23: ('LineId', 'CYMEQOVERHEADLINEUNBALANCED'), 4: ('EquipmentId', 'CYMEQREGULATOR'),
                    5: ('EquipmentId', 'CYMEQTRANSFORMER'), 8: ('EquipmentId', 'CYMEQBREAKER'), 10: ('EquipmentId', 'CYMEQRECLOSER'),
                    13: ('EquipmentId', 'CYMEQSWITCH'), 14: ('EquipmentId', 'CYMEQFUSE'),
-                   17: ('EquipmentId', 'CYMEQSHUNTCAPACITOR')}
+                   17: ('EquipmentId', 'CYMEQSHUNTCAPACITOR'), 12: ('EquipmentId', 'CYMEQSECTIONALIZER'),
+                   18: ('EquipmentId', 'CYMEQSHUNTREACTOR'), 36: ('EquipmentId', 'CYMEQSYNCHRONOUSGENERATOR'),
+                   39: ('EquipmentId', 'CYMEQTHREEWINDINGTRANSFORMER'), 47: ('EquipmentId', 'CYMEQAUTOTRANSFORMER'),
+                   48: ('EquipmentId', 'CYMEQTHREEWINDAUTOTRANSFORMER'), 49: ('EquipmentId', 'CYMEQSVC')}
+SWITCH_CODES = (8, 10, 12, 13, 14)
+LINE_TYPES = ('Underground', 'OverheadLine', 'OverheadLineUnbalanced')
 
 
 def colorref(value):
@@ -133,6 +138,19 @@ class Project:
         networks = [{'id': r['NetworkId'], 'color': colorref(r.get('Color'))} for r in self.tables.get('CYMNETWORK', [])]
         nodes = [{'id': n, 'x': r['X'], 'y': r['Y'], 'network': r.get('NetworkId')}
                  for n, r in self.nodes.items() if r.get('X') is not None and r.get('Y') is not None]
+        # Puntos de conexión sobre la barra (CYMNODECONNECTOR): un tramo sale de su ConnectorIndex.
+        connectors = defaultdict(dict)
+        for r in self.tables.get('CYMNODECONNECTOR', []):
+            if r.get('X') is not None and r.get('Y') is not None and r.get('ConnectorIndex') is not None:
+                connectors[r['NodeId']].setdefault(str(r['ConnectorIndex']), {'x': r['X'], 'y': r['Y']})
+        for n in nodes:
+            if n['id'] in connectors:
+                n['connectors'] = connectors[n['id']]
+        # Barras como las dibuja CYME (CYMBUSDISPLAY): segmento X1,Y1 - X2,Y2 del nodo.
+        buses = [{'node': r['NodeId'], 'x1': r['X1'], 'y1': r['Y1'], 'x2': r['X2'], 'y2': r['Y2']}
+                 for r in self.tables.get('CYMBUSDISPLAY', [])
+                 if None not in (r.get('X1'), r.get('Y1'), r.get('X2'), r.get('Y2'))]
+        tertiary = {r['SectionId']: r for r in self.tables.get('CYMSECTIONNODE', [])}
         sections = []
         for sid, sec in self.sections.items():
             devs = [{'type': DEVICE_NAMES.get(d['DeviceType'], d.get('DeviceTypeText') or str(d['DeviceType'])),
@@ -141,11 +159,18 @@ class Project:
                     for d in self.devices.get(sid, [])]
             points = sorted(self.points.get((sec['NetworkId'], sid), []) or self.points.get((None, sid), []),
                             key=lambda r: r['PointIndex'])
-            sections.append({'id': sid, 'network': sec['NetworkId'], 'from': sec['FromNodeId'], 'to': sec['ToNodeId'],
-                             'phases': PHASES.get(sec['Phase'], ''), 'devices': devs,
-                             'points': [{'x': r['X'], 'y': r['Y']} for r in points]})
+            item = {'id': sid, 'network': sec['NetworkId'], 'from': sec['FromNodeId'], 'to': sec['ToNodeId'],
+                    'from_connector': str(sec.get('FromNodeConnectorIndex') or 0),
+                    'to_connector': str(sec.get('ToNodeConnectorIndex') or 0),
+                    'phases': PHASES.get(sec['Phase'], ''), 'devices': devs,
+                    'points': [{'x': r['X'], 'y': r['Y']} for r in points]}
+            if sid in tertiary:
+                item['tertiary'] = tertiary[sid]['NodeId']
+                item['tertiary_connector'] = str(tertiary[sid].get('NodeConnectorIndex') or 0)
+            sections.append(item)
         sources = [{'id': r['DeviceNumber'], 'network': r['NetworkId'], 'node': r['NodeId']}
                    for r in self.tables.get('CYMSOURCE', [])]
+        unifilar, labels = self._drawing(nodes, sections)
         xs = [n['x'] for n in nodes] or [0]
         ys = [n['y'] for n in nodes] or [0]
         crs = next((r['ValueStr'] for r in self.tables.get('CYMDBPARAMETERS', [])
@@ -159,17 +184,133 @@ class Project:
                     projected = [_utm_to_mercator(n['x'], n['y'], zone, epsg >= 32700) for n in nodes]
                     for n, (mx, my) in zip(nodes, projected):
                         n['mx'], n['my'] = mx, my
+                    south = epsg >= 32700
                     for sec in sections:
                         for q in sec['points']:
-                            q['mx'], q['my'] = _utm_to_mercator(q['x'], q['y'], zone, epsg >= 32700)
+                            q['mx'], q['my'] = _utm_to_mercator(q['x'], q['y'], zone, south)
+                    for n in nodes:
+                        for q in n.get('connectors', {}).values():
+                            q['mx'], q['my'] = _utm_to_mercator(q['x'], q['y'], zone, south)
+                    for b in buses:
+                        b['mx1'], b['my1'] = _utm_to_mercator(b['x1'], b['y1'], zone, south)
+                        b['mx2'], b['my2'] = _utm_to_mercator(b['x2'], b['y2'], zone, south)
+                    for n in nodes:
+                        if 'gw' in n:
+                            n['mw'] = [[*_utm_to_mercator(w[0], w[1], zone, south), *_utm_to_mercator(w[2], w[3], zone, south),
+                                        w[4]] for w in n['gw']]
+                    for label in labels:
+                        label['mx'], label['my'] = _utm_to_mercator(label['x'], label['y'], zone, south)
                     if projected:
                         map_bounds = [min(p[0] for p in projected), min(p[1] for p in projected),
                                       max(p[0] for p in projected), max(p[1] for p in projected)]
             except (ValueError, OverflowError, TypeError):
                 pass  # CRS o posiciones no utilizables: conservar el diagrama sin fondo.
-        return {'file': str(self.path), 'networks': networks, 'nodes': nodes, 'sections': sections,
+        return {'file': str(self.path), 'networks': networks, 'nodes': nodes, 'sections': sections, 'buses': buses,
+                 'unifilar': unifilar, 'labels': labels,
+                 'kv_levels': sorted({n['kv'] for n in nodes if n.get('kv')}, reverse=True),
                  'sources': sources, 'meters': self.meters(), 'bounds': [min(xs), min(ys), max(xs), max(ys)],
                  'crs': crs, 'map_bounds': map_bounds}
+
+    def _drawing(self, nodes, sections):
+        """Dibujo de origen guardado en el mismo proyecto (tablas ESQ_*): tensión nominal de cada nodo, conductores
+        de cada nodo (ESQ_TRAZO) en el mapa y en el unifilar, rótulos de estación y la vista unifilar (posiciones
+        ESQ_NODO.XPdf/YPdf, equipos ESQ_EQUIPO, recorrido de las líneas ESQ_TRAMO_PUNTO). Es dibujo: no cambia
+        CYMNODE ni la red. Devuelve (unifilar | None, rótulos del mapa)."""
+        number = lambda v: isinstance(v, (int, float)) and not isinstance(v, bool)
+        by_id = {n['id']: n for n in nodes}
+        esq = {r.get('NodeId'): r for r in self.tables.get('ESQ_NODO', [])}
+        for n in nodes:
+            kv = (esq.get(n['id']) or {}).get('KV')
+            base = self.nodes[n['id']].get('UserDefinedBaseVoltage')
+            try:
+                n['kv'] = float(kv) if kv not in (None, '') else float(base) if number(base) and base > 0 else None
+            except ValueError:
+                n['kv'] = None  # nodo con dos tensiones declaradas: sin clase
+        # Un nodo sin tensión declarada (extremo de línea, derivación, cabecera) toma la del otro extremo de un tramo
+        # sin transformador: es la misma clase de tensión. Solo para colorear.
+        same_level = [sec for sec in sections if not any('Transformer' in d['type'] or d['type'] == 'Regulator'
+                                                         for d in sec['devices']) and 'tertiary' not in sec]
+        declared = any(n['kv'] for n in nodes)
+        for _ in range(50 if declared else 0):
+            changed = False
+            for sec in same_level:
+                a, b = by_id.get(sec['from']), by_id.get(sec['to'])
+                if a and b and (a['kv'] is None) != (b['kv'] is None):
+                    a['kv'] = b['kv'] = a['kv'] or b['kv']
+                    changed = True
+            if not changed:
+                break
+        for sec in sections:
+            ends = {(by_id.get(sec['from']) or {}).get('kv'), (by_id.get(sec['to']) or {}).get('kv')}
+            sec['kv'] = ends.pop() if len(ends) == 1 else None
+        # Rótulo de cada estación en el mapa: centrado sobre el borde superior de sus nodos (o en su ubicación).
+        cajas = {}
+        for n in nodes:
+            e = esq.get(n['id']) or {}
+            if e.get('Estacion') and e.get('Ubicacion') == 'estación':
+                c = cajas.setdefault(e['Estacion'], [n['x'], n['x'], n['y']])
+                c[0], c[1], c[2] = min(c[0], n['x']), max(c[1], n['x']), max(c[2], n['y'])
+        labels = [{'t': r['Estacion'], 'x': (c[0] + c[1]) / 2 if c else r['X'], 'y': c[2] if c else r['Y']}
+                  for r in self.tables.get('ESQ_ESTACION', []) if number(r.get('X')) and number(r.get('Y'))
+                  for c in [cajas.get(r['Estacion'])]]
+        extra = []
+        for r in self.tables.get('ESQ_TRAZO', []):
+            pdf = [r.get(k) for k in ('X1Pdf', 'Y1Pdf', 'X2Pdf', 'Y2Pdf')]
+            bar = 1 if r.get('Barra') else 0
+            node = by_id.get(r.get('Elemento')) if r.get('Tipo') == 'nodo' else None
+            if node is None:
+                if all(map(number, pdf)):
+                    extra.append([*pdf, bar])
+                continue
+            if all(map(number, pdf)):
+                node.setdefault('uw', []).append([*pdf, bar])
+            geo = [r.get(k) for k in ('X1', 'Y1', 'X2', 'Y2')]
+            if all(map(number, geo)):
+                node.setdefault('gw', []).append([*geo, bar])
+        pos = {n: (r['XPdf'], r['YPdf']) for n, r in esq.items() if number(r.get('XPdf')) and number(r.get('YPdf'))}
+        if not pos:
+            return None, labels
+        # Nodos sin lugar en el dibujo (derivaciones, uniones): media de sus vecinos, solo para dibujar.
+        vecinos = defaultdict(set)
+        for sec in self.sections.values():
+            vecinos[sec['FromNodeId']].add(sec['ToNodeId'])
+            vecinos[sec['ToNodeId']].add(sec['FromNodeId'])
+        estimados = set()
+        for _ in range(60):
+            nuevos = {n: [pos[v] for v in vs if v in pos] for n, vs in vecinos.items() if n not in pos}
+            nuevos = {n: (sum(q[0] for q in ps) / len(ps), sum(q[1] for q in ps) / len(ps)) for n, ps in nuevos.items() if ps}
+            if not nuevos:
+                break
+            pos.update(nuevos)
+            estimados.update(nuevos)
+        for n in nodes:
+            if n['id'] in pos:
+                n['ux'], n['uy'] = pos[n['id']]
+        equipos = {r.get('DeviceNumber'): r for r in self.tables.get('ESQ_EQUIPO', [])}
+        recorridos = defaultdict(list)
+        for r in self.tables.get('ESQ_TRAMO_PUNTO', []):
+            if number(r.get('XPdf')) and number(r.get('YPdf')):
+                recorridos[r.get('SectionId')].append(r)
+        sin_recorrido = 0
+        for sec in sections:
+            e = equipos.get(sec['id'])
+            if sec['id'] in recorridos:
+                sec['upoints'] = [{'x': r['XPdf'], 'y': r['YPdf']}
+                                  for r in sorted(recorridos[sec['id']], key=lambda r: r['PointIndex'])]
+            elif e and number(e.get('XPdf')) and number(e.get('YPdf')):
+                sec['upoints'] = [{'x': e['XPdf'], 'y': e['YPdf']}]
+            elif any(d['type'] in LINE_TYPES for d in sec['devices']):
+                sec['uguess'] = True  # línea sin conductor en el dibujo: recta entre sus extremos
+                sin_recorrido += 1
+        buses = [{'node': n, 'x1': r['BarraX1Pdf'], 'y1': r['BarraY1Pdf'], 'x2': r['BarraX2Pdf'], 'y2': r['BarraY2Pdf']}
+                 for n, r in esq.items() if all(number(r.get(k)) for k in ('BarraX1Pdf', 'BarraY1Pdf', 'BarraX2Pdf', 'BarraY2Pdf'))]
+        rotulos = [{'t': r['Texto'], 'x': r['XPdf'], 'y': r['YPdf']} for r in self.tables.get('ESQ_ROTULO', [])
+                   if number(r.get('XPdf')) and number(r.get('YPdf'))]
+        xs = [q[0] for q in pos.values()] + [w[i] for w in extra for i in (0, 2)]
+        ys = [q[1] for q in pos.values()] + [w[i] for w in extra for i in (1, 3)]
+        return {'bounds': [min(xs), min(ys), max(xs), max(ys)], 'buses': buses, 'labels': rotulos, 'extra': extra,
+                'estimated_nodes': len(estimados), 'lines_without_route': sin_recorrido,
+                'source': 'ESQ_NODO, ESQ_EQUIPO, ESQ_TRAZO, ESQ_TRAMO_PUNTO (dibujo de origen)'}, labels
 
     def meters(self):
         """Lecturas actuales de CYMNETWORKMETER y si difieren de las del archivo abierto."""
@@ -182,7 +323,7 @@ class Project:
 
     def _device_state(self, attachment):
         code = attachment['DeviceType']
-        if code not in (8, 10, 13, 14):
+        if code not in SWITCH_CODES:
             return {}
         row = self.rows.get((DEVICES[code][0], attachment['NetworkId'], attachment['DeviceNumber']), {})
         closed = PHASES.get(row.get('ClosedPhase'), '')
@@ -194,14 +335,14 @@ class Project:
             tree[net['NetworkId']] = defaultdict(list)
         for sid, devs in self.devices.items():
             for d in devs:
-                name = DEVICE_NAMES.get(d['DeviceType'])
+                name = DEVICE_NAMES.get(d['DeviceType']) or d.get('DeviceTypeText')
                 if name and name not in ('OverheadLine', 'OverheadLineUnbalanced', 'Underground', 'SpotLoad'):
                     tree.setdefault(d['NetworkId'], defaultdict(list))[name].append(
                         {'number': d['DeviceNumber'], 'section': sid})
         counts = defaultdict(lambda: defaultdict(int))
         for sid, devs in self.devices.items():
             for d in devs:
-                counts[d['NetworkId']][DEVICE_NAMES.get(d['DeviceType'], '?')] += 1
+                counts[d['NetworkId']][DEVICE_NAMES.get(d['DeviceType']) or d.get('DeviceTypeText') or '?'] += 1
         for r in self.tables.get('CYMSOURCE', []):
             tree.setdefault(r['NetworkId'], defaultdict(list))['Source'].append(
                 {'number': r['DeviceNumber'], 'node': r['NodeId']})

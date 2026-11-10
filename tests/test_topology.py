@@ -89,6 +89,70 @@ class TopologyTests(unittest.TestCase):
         self.assertEqual(analyze(data)['summary']['phases']['A']['reached_nodes'], 1)
         self.assertEqual(analyze(data)['summary']['phases']['B']['reached_nodes'], 1)
 
+    def test_sectionalizer_is_a_switching_device(self):
+        data = fixture()
+        data['CYMSECTIONDEVICE'][1]['DeviceType'] = 12
+        data['CYMSECTIONALIZER'] = [data['CYMSWITCH'].pop(1)]
+        report = analyze(data)
+        self.assertEqual(report['summary']['excluded_sections'], 0)
+        self.assertEqual(report['summary']['switching_devices'], 2)
+        data['CYMSECTIONALIZER'][0]['ClosedPhase'] = 0
+        self.assertEqual(analyze(data)['summary']['phases']['A']['reached_nodes'], 2)
+
+    def test_shared_instance_table_requires_matching_device_type(self):
+        # CYMTRANSFORMER guarda transformadores (5) y autotransformadores (47).
+        data = fixture()
+        data['CYMSECTIONDEVICE'][1]['DeviceType'] = 47
+        data['CYMTRANSFORMER'] = [{'NetworkId': 'N', 'DeviceNumber': '1', 'DeviceType': 47, 'Status': 0}]
+        self.assertEqual(analyze(data)['summary']['excluded_sections'], 0)
+        data['CYMSECTIONDEVICE'][1]['DeviceType'] = 5
+        report = analyze(data)
+        self.assertEqual(report['summary']['excluded_sections'], 1)
+        self.assertEqual(report['issues'][0]['code'], 'missing_or_duplicate_instance:CYMTRANSFORMER:1')
+
+    def three_winding(self, code=39):
+        data = fixture()
+        data['CYMNODE'].append({'NetworkId': 'N', 'NodeId': 'x'})
+        data['CYMSECTIONDEVICE'][1]['DeviceType'] = code
+        data['CYMTHREEWINDINGTRANSFORMER'] = [{'NetworkId': 'N', 'DeviceNumber': '1', 'DeviceType': code,
+                                               'Status': 0}]
+        data['CYMSECTIONNODE'] = [{'SectionId': '1', 'NodeId': 'x', 'NodeConnectorIndex': 0,
+                                   'BreakPointIndex': -1}]
+        return data
+
+    def test_three_winding_transformer_reaches_tertiary_node(self):
+        for code in (39, 48):
+            report = analyze(self.three_winding(code))
+            phase = report['summary']['phases']['A']
+            self.assertEqual(report['summary']['excluded_sections'], 0)
+            self.assertEqual((phase['reached_nodes'], phase['conducting_sections'], phase['cycle_rank']), (4, 2, 0))
+            self.assertEqual(report['sections'][1]['tertiary_node'], ['N', 'x'])
+
+    def test_three_winding_without_tertiary_is_excluded(self):
+        data = self.three_winding()
+        data['CYMSECTIONNODE'] = []
+        report = analyze(data)
+        self.assertEqual(report['issues'][0]['code'], 'missing_or_ambiguous_tertiary_node')
+        self.assertEqual(report['summary']['phases']['A']['reached_nodes'], 2)
+
+    def test_tertiary_row_on_two_terminal_section_is_rejected(self):
+        data = fixture()
+        data['CYMNODE'].append({'NetworkId': 'N', 'NodeId': 'x'})
+        data['CYMSECTIONNODE'] = [{'SectionId': '1', 'NodeId': 'x', 'NodeConnectorIndex': 0}]
+        report = analyze(data)
+        self.assertEqual(report['issues'][0]['code'], 'tertiary_node_without_three_winding_device')
+
+    def test_transmission_shunt_devices_do_not_block_section(self):
+        data = fixture()
+        shunts = {36: 'CYMSYNCHRONOUSGENERATOR', 18: 'CYMSHUNTREACTOR', 49: 'CYMSVC', 62: 'CYMSTATCOM'}
+        for code, table in shunts.items():
+            data['CYMSECTIONDEVICE'].append({'NetworkId': 'N', 'SectionId': '1', 'DeviceNumber': f'd{code}',
+                                             'DeviceType': code})
+            data[table] = [{'NetworkId': 'N', 'DeviceNumber': f'd{code}'}]
+        report = analyze(data)
+        self.assertEqual(report['summary']['excluded_sections'], 0)
+        self.assertEqual(report['summary']['phases']['A']['reached_nodes'], 3)
+
     def test_unknown_device_and_nonzero_connector_are_not_silently_ignored(self):
         for change in ('device', 'connector'):
             data = fixture()

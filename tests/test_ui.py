@@ -62,6 +62,90 @@ class ServiceTests(unittest.TestCase):
         self.assertIsNone(geo['map_bounds'])
         self.assertTrue(all('mx' not in n for n in geo['nodes']))
 
+    def test_buses_connectors_and_tertiary_are_drawn_like_cyme(self):
+        # CYMBUSDISPLAY (barra), CYMNODECONNECTOR (punto de salida del tramo) y CYMSECTIONNODE (terciario).
+        for row in self.project.nodes.values():
+            row['X'], row['Y'] = 500000 + row['X'], 7200000 + row['Y']
+        t = self.project.tables
+        t['CYMBUSDISPLAY'] = [{'NetworkId': 'N', 'NodeId': 'n1', 'X1': 500900.0, 'Y1': 7200500.0,
+                               'X2': 501100.0, 'Y2': 7200500.0, 'Width': 200.0}]
+        t['CYMNODECONNECTOR'] = [{'NetworkId': 'N', 'NodeId': 'n1', 'ConnectorIndex': i, 'X': 500950.0 + 50 * i,
+                                  'Y': 7200500.0} for i in range(3)]
+        t['CYMSECTION'][1]['FromNodeConnectorIndex'] = 2
+        t['CYMSECTIONNODE'] = [{'SectionId': 's2', 'NodeId': 'n0', 'NodeConnectorIndex': 0}]
+        t['CYMSECTIONDEVICE'].append({'NetworkId': 'N', 'SectionId': 's2', 'DeviceNumber': 'T3', 'DeviceType': 39,
+                                      'Location': 0})
+        self.project._index()
+        geo = self.project.geometry()
+        self.assertEqual([b['node'] for b in geo['buses']], ['n1'])
+        self.assertTrue(all(k in geo['buses'][0] for k in ('mx1', 'my1', 'mx2', 'my2')))
+        node = next(n for n in geo['nodes'] if n['id'] == 'n1')
+        self.assertEqual(node['connectors']['2']['x'], 501050.0)
+        self.assertIn('mx', node['connectors']['2'])
+        sec = next(s for s in geo['sections'] if s['id'] == 's2')
+        self.assertEqual((sec['from_connector'], sec['tertiary'], sec['tertiary_connector']), ('2', 'n0', '0'))
+        self.assertIn('ThreeWindingTransformer', [d['type'] for d in sec['devices']])
+        groups = self.project.explorer()[0]['groups']
+        self.assertEqual([g['number'] for g in groups['ThreeWindingTransformer']], ['T3'])
+
+    def test_source_drawing_wires_routes_labels_and_voltage_class(self):
+        # ESQ_TRAZO: conductores por nodo (mapa y unifilar) y los que no están en el modelo; ESQ_TRAMO_PUNTO:
+        # recorrido de una línea; tensión nominal propagada por tramos sin transformador; rótulos de estación.
+        for row in self.project.nodes.values():
+            row['X'], row['Y'] = 500000 + row['X'], 7200000 + row['Y']
+        t = self.project.tables
+        t['ESQ_NODO'] = [{'NodeId': 'n0', 'XPdf': 10.0, 'YPdf': -20.0, 'KV': '220', 'Estacion': 'E1', 'Ubicacion': 'estación'},
+                         {'NodeId': 'n1', 'XPdf': 30.0, 'YPdf': -20.0, 'KV': None, 'Estacion': 'E1', 'Ubicacion': 'estación'},
+                         {'NodeId': 'n2', 'XPdf': 60.0, 'YPdf': -20.0, 'KV': None}]
+        t['ESQ_TRAZO'] = [
+            {'Tipo': 'nodo', 'Elemento': 'n1', 'X1Pdf': 30.0, 'Y1Pdf': -20.0, 'X2Pdf': 30.0, 'Y2Pdf': -25.0, 'Barra': False,
+             'X1': 501000.0, 'Y1': 7200500.0, 'X2': 501000.0, 'Y2': 7200490.0},
+            {'Tipo': 'nodo', 'Elemento': 'n2', 'X1Pdf': 60.0, 'Y1Pdf': -20.0, 'X2Pdf': 62.0, 'Y2Pdf': -20.0, 'Barra': True},
+            {'Tipo': 'sin modelo', 'Elemento': 'N9', 'X1Pdf': 0.0, 'Y1Pdf': 0.0, 'X2Pdf': 5.0, 'Y2Pdf': 0.0, 'Barra': False}]
+        t['ESQ_TRAMO_PUNTO'] = [{'SectionId': 's2', 'PointIndex': 1, 'XPdf': 45.0, 'YPdf': -30.0},
+                                {'SectionId': 's2', 'PointIndex': 0, 'XPdf': 30.0, 'YPdf': -30.0}]
+        t['ESQ_ESTACION'] = [{'Estacion': 'E1', 'X': 500500.0, 'Y': 7200400.0}]
+        t['ESQ_ROTULO'] = [{'Texto': 'E1', 'XPdf': 20.0, 'YPdf': -10.0}]
+        geo = self.project.geometry()
+        nodes = {n['id']: n for n in geo['nodes']}
+        self.assertEqual(nodes['n1']['uw'], [[30.0, -20.0, 30.0, -25.0, 0]])
+        self.assertEqual(nodes['n1']['gw'], [[501000.0, 7200500.0, 501000.0, 7200490.0, 0]])
+        self.assertEqual(len(nodes['n1']['mw'][0]), 5)
+        self.assertNotIn('gw', nodes['n2'])
+        self.assertEqual(geo['unifilar']['extra'], [[0.0, 0.0, 5.0, 0.0, 0]])
+        sec = {s['id']: s for s in geo['sections']}
+        self.assertEqual(sec['s2']['upoints'], [{'x': 30.0, 'y': -30.0}, {'x': 45.0, 'y': -30.0}])
+        self.assertTrue(sec['s1'].get('uguess'))  # línea sin recorrido en el dibujo
+        self.assertEqual(geo['unifilar']['lines_without_route'], 1)
+        # s1 tiene un regulador: no propaga; s2 (línea y carga) sí, de n1 a n2 no hay dato, así que nada se inventa.
+        self.assertEqual((nodes['n0']['kv'], nodes['n1']['kv'], nodes['n2']['kv']), (220.0, None, None))
+        self.assertEqual(geo['kv_levels'], [220.0])
+        # Rótulo del mapa: centrado sobre el borde superior de los nodos de la estación.
+        self.assertEqual([(l['t'], l['x'], l['y']) for l in geo['labels']], [('E1', 500500.0, 7200500.0)])
+        self.assertIn('mx', geo['labels'][0])
+        self.assertEqual(geo['unifilar']['labels'], [{'t': 'E1', 'x': 20.0, 'y': -10.0}])
+
+    def test_schematic_view_uses_source_drawing_of_the_same_project(self):
+        # Vista unifilar: ESQ_NODO / ESQ_EQUIPO del mismo .nandu.sqlite; un nodo sin lugar va entre sus vecinos.
+        self.assertIsNone(self.project.geometry()['unifilar'])
+        t = self.project.tables
+        t['ESQ_NODO'] = [{'NodeId': 'n0', 'XPdf': 10.0, 'YPdf': -20.0},
+                         {'NodeId': 'n1', 'XPdf': 30.0, 'YPdf': -20.0, 'BarraX1Pdf': 25.0, 'BarraY1Pdf': -20.0,
+                          'BarraX2Pdf': 35.0, 'BarraY2Pdf': -20.0},
+                         {'NodeId': 'n2', 'XPdf': None, 'YPdf': None}]
+        t['ESQ_EQUIPO'] = [{'DeviceNumber': 's1', 'XPdf': 20.0, 'YPdf': -25.0}]
+        geo = self.project.geometry()
+        nodes = {n['id']: n for n in geo['nodes']}
+        self.assertEqual((nodes['n0']['ux'], nodes['n0']['uy']), (10.0, -20.0))
+        self.assertEqual((nodes['n2']['ux'], nodes['n2']['uy']), (30.0, -20.0))  # vecino n1
+        self.assertEqual(geo['unifilar']['estimated_nodes'], 1)
+        self.assertEqual(geo['unifilar']['buses'], [{'node': 'n1', 'x1': 25.0, 'y1': -20.0, 'x2': 35.0, 'y2': -20.0}])
+        sec = {s['id']: s for s in geo['sections']}
+        self.assertEqual(sec['s1']['upoints'], [{'x': 20.0, 'y': -25.0}])
+        self.assertEqual(geo['unifilar']['bounds'], [10.0, -20.0, 30.0, -20.0])
+        # La vista no toca la red: CYMNODE conserva sus coordenadas.
+        self.assertEqual((nodes['n0']['x'], nodes['n0']['y']), (0.0, 500.0))
+
     def test_section_points_follow_point_index_and_project_to_map(self):
         # CYMINTERMEDIATEPOINT: forma del tramo de From a To; se ordena por PointIndex y se filtra por red.
         for row in self.project.nodes.values():

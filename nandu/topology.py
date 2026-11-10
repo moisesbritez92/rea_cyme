@@ -1,30 +1,55 @@
 """Conectividad condicional por fase. No calcula tensión ni flujo eléctrico.
 
 Perfil CYME 9: fases 1..7 contrastadas con CymPhase en Cyme64.tlb.
-Tipos Access contrastados por coincidencia de instancias con tablas de dispositivos
-(Transformer = 5: CYMTRANSFORMER.DeviceType y CYMSECTIONDEVICE de BD_respaldo_lc.mdb). Un
-transformador solo une sus dos nodos; no se modela grupo de conexión, desfase ni relación.
+Los códigos DeviceType de Access se verificaron cruzando bases Access con su .sxst (tutoriales
+de CYME y bases de prueba creadas en CYME; ver docs/cyme-ingenieria-inversa.md). Un
+transformador solo une sus nodos; no se modela grupo de conexión, desfase ni relación. El de
+tres devanados une además el nodo terciario, que CYME guarda en CYMSECTIONNODE.
 Status=0 se admite como hipótesis explícita; cualquier otro estado bloquea el tramo.
 """
 from collections import Counter, defaultdict, deque
 import math
 
 PHASES = {0: '', 1: 'A', 2: 'B', 3: 'C', 4: 'AB', 5: 'AC', 6: 'BC', 7: 'ABC'}
+# Códigos CYMSECTIONDEVICE.DeviceType verificados (nombre = etiqueta del .sxst).
+DEVICE_NAMES = {
+    1: 'Underground', 2: 'OverheadLine', 4: 'Regulator', 5: 'Transformer', 8: 'Breaker', 10: 'Recloser',
+    12: 'Sectionalizer', 13: 'Switch', 14: 'Fuse', 17: 'ShuntCapacitor', 18: 'ShuntReactor', 20: 'SpotLoad',
+    21: 'DistributedLoad', 23: 'OverheadLineUnbalanced', 36: 'SynchronousGenerator',
+    39: 'ThreeWindingTransformer', 47: 'AutoTransformer', 48: 'ThreeWindingAutoTransformer', 49: 'SVC',
+    62: 'Statcom',
+}
+# Tabla de instancias y papel topológico. Varias clases comparten tabla y se distinguen por
+# DeviceType: CYMTRANSFORMER (5, 47), CYMTHREEWINDINGTRANSFORMER (39, 48) y CYMLOAD (20, 21).
 DEVICES = {
     1: ('CYMUNDERGROUNDLINE', 'series'),
     2: ('CYMOVERHEADLINE', 'series'),
     23: ('CYMOVERHEADLINEUNBALANCED', 'series'),
     4: ('CYMREGULATOR', 'series'),
     5: ('CYMTRANSFORMER', 'series'),
+    47: ('CYMTRANSFORMER', 'series'),
+    39: ('CYMTHREEWINDINGTRANSFORMER', 'three_winding'),
+    48: ('CYMTHREEWINDINGTRANSFORMER', 'three_winding'),
     8: ('CYMBREAKER', 'switch'),
     10: ('CYMRECLOSER', 'switch'),
+    12: ('CYMSECTIONALIZER', 'switch'),
     13: ('CYMSWITCH', 'switch'),
     14: ('CYMFUSE', 'switch'),
     17: ('CYMSHUNTCAPACITOR', 'shunt'),
+    18: ('CYMSHUNTREACTOR', 'shunt'),
     20: ('CYMLOAD', 'shunt'),
+    21: ('CYMLOAD', 'shunt'),
+    36: ('CYMSYNCHRONOUSGENERATOR', 'shunt'),
+    49: ('CYMSVC', 'shunt'),
+    62: ('CYMSTATCOM', 'shunt'),
 }
-TABLES = {'CYMNODE', 'CYMNODEINTER', 'CYMSECTION', 'CYMSECTIONDEVICE', 'CYMSOURCE',
+TABLES = {'CYMNODE', 'CYMNODEINTER', 'CYMSECTION', 'CYMSECTIONDEVICE', 'CYMSECTIONNODE', 'CYMSOURCE',
           'CYMDBPARAMETERS', *[value[0] for value in DEVICES.values()]}
+
+
+def instances_of(index, key, code):
+    """Filas de la instancia; si la tabla trae DeviceType, debe coincidir con el del tramo."""
+    return [row for row in index.get(key, []) if row.get('DeviceType', code) == code]
 
 
 def phases(code, allow_empty=False):
@@ -63,11 +88,15 @@ def analyze(tables):
         raise ValueError('missing_or_ambiguous_node_membership')
 
     instance_indices = {}
-    for table, role in DEVICES.values():
+    for table in {table for table, _ in DEVICES.values()}:
         index = defaultdict(list)
         for row in tables.get(table, []):
             index[(row.get('NetworkId'), row.get('DeviceNumber'))].append(row)
         instance_indices[table] = index
+    # CYMSECTIONNODE no trae NetworkId: el SectionId es único en una base CYME.
+    tertiaries = defaultdict(list)
+    for row in tables.get('CYMSECTIONNODE', []):
+        tertiaries[row.get('SectionId')].append(row)
     attachments = defaultdict(list)
     device_counts = Counter()
     for row in tables.get('CYMSECTIONDEVICE', []):
@@ -104,7 +133,7 @@ def analyze(tables):
             devices = attachments.get((net, sid), [])
             if not devices:
                 raise ValueError('section_without_devices')
-            series_count = 0
+            series_count, three_winding = 0, False
             for device in devices:
                 code, number = device.get('DeviceType'), device.get('DeviceNumber')
                 if code not in DEVICES:
@@ -112,13 +141,14 @@ def analyze(tables):
                 if device_counts[(net, number, code)] != 1:
                     raise ValueError(f'ambiguous_device_attachment:{number}')
                 table, role = DEVICES[code]
-                matches = instance_indices[table].get((net, number), [])
+                matches = instances_of(instance_indices[table], (net, number), code)
                 if len(matches) != 1:
                     raise ValueError(f'missing_or_duplicate_instance:{table}:{number}')
                 instance = matches[0]
                 if role == 'shunt':
                     continue
                 series_count += 1
+                three_winding = three_winding or role == 'three_winding'
                 # No confundir Status con ClosedPhase ni con CymStatus de COM.
                 if type(instance.get('Status')) is not int or instance['Status'] != 0:
                     raise ValueError(f'unverified_device_status:{table}:{number}:{instance.get("Status")}')
@@ -132,13 +162,28 @@ def analyze(tables):
                                      'status_raw': instance.get('Status')})
             if not series_count:
                 raise ValueError('section_without_supported_series_device')
+            terminals = [(a, b)]
+            if three_winding or tertiaries.get(sid):
+                if not three_winding:
+                    raise ValueError('tertiary_node_without_three_winding_device')
+                rows = tertiaries.get(sid, [])
+                if len(rows) != 1:
+                    raise ValueError('missing_or_ambiguous_tertiary_node')
+                t = resolve(net, rows[0].get('NodeId'), rows[0].get('NodeConnectorIndex', 0))
+                if t in (a, b):
+                    raise ValueError('self_loop')
+                record['tertiary_node'] = list(t)
+                for phase in physical:
+                    present[phase].add(t)
+                terminals.append((a, t))
             record.update(state='included', conducting_phases=sorted(conducting),
                           blocked_phases=sorted(physical - conducting))
             for phase in conducting:
-                edge_id = len(edges[phase])
-                edges[phase].append((a, b, net, sid))
-                adjacency[phase][a].append((b, edge_id))
-                adjacency[phase][b].append((a, edge_id))
+                for x, y in terminals:
+                    edge_id = len(edges[phase])
+                    edges[phase].append((x, y, net, sid))
+                    adjacency[phase][x].append((y, edge_id))
+                    adjacency[phase][y].append((x, edge_id))
         except ValueError as exc:
             record['reason'] = str(exc)
             problem(str(exc), network_id=net, section_id=sid)
@@ -185,7 +230,8 @@ def analyze(tables):
                                  'component': component['id'], 'reached_from_source': bool(source_labels)}
                                 for n in sorted(members, key=lambda n: (n[0] or '', n[1])))
         components[phase] = phase_components
-        summaries[phase] = {'nodes': len(present[phase]), 'conducting_sections': len(edges[phase]),
+        summaries[phase] = {'nodes': len(present[phase]),
+                            'conducting_sections': len({(e[2], e[3]) for e in edges[phase]}),
                             'components': len(phase_components),
                             'reached_nodes': sum(c['node_count'] for c in phase_components if c['sources']),
                             'not_reached_nodes': sum(c['node_count'] for c in phase_components if not c['sources']),
@@ -207,6 +253,9 @@ def analyze(tables):
                 'Fuentes con OperatingVoltage positivo se consideran disponibles en esa fase.',
                 'Las etiquetas A/B/C se propagan sin modelar acoplamiento delta, impedancia, tensión ni controles.',
                 'NormalStatus es informativo: el análisis usa ClosedPhase guardado en la base.',
+                'Un transformador de tres devanados une primario, secundario y el terciario de CYMSECTIONNODE '
+                'en las fases del tramo.',
+                'Generadores, reactores, SVC y STATCOM son equipos shunt: no unen nodos.',
             ],
             'limitations': ['No alcanzado significa sin camino en el grafo admitido, no ausencia física de tensión.',
                             'No se determina alimentación de cargas dentro de tramos con dispositivos abiertos.',

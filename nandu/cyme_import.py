@@ -12,6 +12,9 @@ from . import __version__
 
 REQUIRED = {'CYMNETWORK', 'CYMNODE', 'CYMSECTION', 'CYMSECTIONDEVICE', 'CYMCUSTOMERLOAD', 'CYMSOURCE'}
 GLOBAL = {'CYMDBPARAMETERS', 'CYMSCHEMAVERSION', 'CYMCONSUMERCLASS', 'CYMLOADMODEL'}
+# Tablas sin NetworkId que cuelgan de una sección: se leen las filas de las secciones importadas.
+# CYMSECTIONNODE guarda el nodo terciario de los transformadores de tres devanados.
+SECTION_SCOPED = {'CYMSECTIONNODE'}
 REQUIRED_COLUMNS = {
     'CYMNETWORK': {'NetworkId'}, 'CYMNODE': {'NetworkId', 'NodeId', 'X', 'Y'},
     'CYMSECTION': {'NetworkId', 'SectionId', 'FromNodeId', 'ToNodeId', 'Phase'},
@@ -71,7 +74,7 @@ def import_database(source, network_ids, output):
     before = digest(source)
     started = datetime.now(timezone.utc).isoformat()
     db = connect(source)
-    tables, schemas, excluded = {}, {}, []
+    tables, schemas, excluded, deferred = {}, {}, [], []
     try:
         cursor = db.cursor()
         names = sorted({r.table_name for r in cursor.tables(tableType='TABLE')
@@ -87,6 +90,9 @@ def import_database(source, network_ids, output):
             fields = {c['name'] for c in columns}
             if name in REQUIRED_COLUMNS and not REQUIRED_COLUMNS[name].issubset(fields):
                 raise ValueError(f'Esquema incompatible en {name}: {sorted(REQUIRED_COLUMNS[name] - fields)}')
+            if name in SECTION_SCOPED and 'SectionId' in fields:
+                deferred.append((name, columns))
+                continue
             if 'NetworkId' in fields:
                 scope = 'selected_networks'
             elif name.startswith('CYMEQ') or name in GLOBAL:
@@ -105,10 +111,18 @@ def import_database(source, network_ids, output):
             labels = [c[0] for c in result.description]
             tables[name] = [dict(zip(labels, map(portable, row))) for row in result]
             schemas[name] = {'scope': scope, 'columns': columns}
+        section_ids = {r['SectionId'] for r in tables['CYMSECTION']}
+        for name, columns in deferred:
+            result = cursor.execute(f'SELECT * FROM [{name}]')
+            labels = [c[0] for c in result.description]
+            rows = [dict(zip(labels, map(portable, row))) for row in result]
+            tables[name] = [r for r in rows if r['SectionId'] in section_ids]
+            schemas[name] = {'scope': 'selected_sections', 'columns': columns}
         # Los nodos frontera de esta base pueden tener NetworkId NULL. Recuperar
-        # todas las ocurrencias de los extremos, sin asignarles una red inventada.
+        # todas las ocurrencias de los extremos (terciarios incluidos), sin asignarles una red inventada.
         endpoints = sorted({r[k] for r in tables['CYMSECTION']
-                            for k in ('FromNodeId', 'ToNodeId') if r[k] is not None})
+                            for k in ('FromNodeId', 'ToNodeId') if r[k] is not None}
+                           | {r['NodeId'] for r in tables.get('CYMSECTIONNODE', []) if r.get('NodeId') is not None})
         for offset in range(0, len(endpoints), 100):
             batch = endpoints[offset:offset + 100]
             result = cursor.execute('SELECT * FROM [CYMNODE] WHERE [NodeId] IN ('

@@ -9,7 +9,7 @@ const fmt = (v, d = 2) => (v === null || v === undefined || v === '') ? '' : Num
 const S = {
   file: null, geom: null, explorer: [], nodes: new Map(), sections: [], sectionById: new Map(),
   last: null, view: { s: 1, tx: 0, ty: 0 }, selection: null, hover: null, report: 'messages', options: {},
-  grids: {}, popouts: new Map(),
+  grids: {}, popouts: new Map(), layout: 'geographic', version: 0, snap: new Map(), labels: [], wired: false,
   dpr: window.devicePixelRatio || 1,
 };
 const canvas = $('#view');
@@ -54,6 +54,11 @@ function prepareMapGeometry(geom) {
   const bounds = [Infinity, Infinity, -Infinity, -Infinity];
   geom.nodes.forEach((node, i) => { [node.mx, node.my] = points[i]; });
   for (const sec of geom.sections) for (const q of sec.points || []) [q.mx, q.my] = projectUtm(q.x, q.y, zone, epsg >= 32700) || [NaN, NaN];
+  for (const node of geom.nodes) for (const q of Object.values(node.connectors || {})) [q.mx, q.my] = projectUtm(q.x, q.y, zone, epsg >= 32700) || [NaN, NaN];
+  for (const b of geom.buses || []) {
+    [b.mx1, b.my1] = projectUtm(b.x1, b.y1, zone, epsg >= 32700) || [NaN, NaN];
+    [b.mx2, b.my2] = projectUtm(b.x2, b.y2, zone, epsg >= 32700) || [NaN, NaN];
+  }
   for (const [mx, my] of points) {
     bounds[0] = Math.min(bounds[0], mx); bounds[1] = Math.min(bounds[1], my);
     bounds[2] = Math.max(bounds[2], mx); bounds[3] = Math.max(bounds[3], my);
@@ -85,6 +90,11 @@ function busy(on, text = 'Running...') { $('#busy').hidden = !on; $('#busyText')
 
 /* ---------------- Carga ---------------- */
 async function init() {
+  // Símbolos y capa «Default Symbols» de la instalación local de CYME (null si no está instalado).
+  try { S.cyme = await api('symbols'); } catch (e) { S.cyme = null; }
+  const cymeOption = $('#colorLayer option[value="default"]');
+  cymeOption.disabled = !S.cyme;
+  if (S.cyme) $('#colorLayer').value = 'default';
   const { files, initial } = await api('files');
   const file = initial || files[0];
   if (file) await openFile(file);
@@ -101,8 +111,11 @@ async function openFile(file) {
     if (!S.geom.map_bounds) $('#mapLayer').value = 'none';
     previousMapLayer = $('#mapLayer').value;
     updateMapAttribution();
+    // Con tensión nominal por nodo (transmisión), los colores del unifilar por defecto.
+    if ((S.geom.kv_levels || []).length > 1 && ['network', 'default'].includes($('#colorLayer').value)) $('#colorLayer').value = 'kv';
+    applyLayout();
     S.selection = null;
-    $('#viewTab').textContent = `${S.geom.networks.map((n) => n.id).join(', ')} - Geographic`;
+    $('#viewTab').textContent = `${S.geom.networks.map((n) => n.id).join(', ')} - ${schematic() ? 'Schematic' : 'Geographic'}`;
     updateCrs();
     renderProperties(null); renderReports(); resize(false); fitExtents();
     status(`Ready - ${S.sections.length} sections, ${S.nodes.size} nodes`);
@@ -117,6 +130,13 @@ function applyNetwork(data) {
   S.nodes = new Map(S.geom.nodes.map((n) => [n.id, n]));
   S.sections = S.geom.sections.filter((s) => S.nodes.has(s.from) && S.nodes.has(s.to));
   S.sectionById = new Map(S.sections.map((s) => [s.id, s]));
+  S.allSections = S.sections;
+  if (!S.geom.unifilar) S.layout = 'geographic';
+  $$('[data-action="view-schematic"]').forEach((b) => { b.disabled = !S.geom.unifilar; });
+  const kvOption = $('#colorLayer option[value="kv"]');
+  kvOption.disabled = !(S.geom.kv_levels || []).length;
+  if (kvOption.disabled && $('#colorLayer').value === 'kv') $('#colorLayer').value = 'network';
+  applyLayout();
   S.sourcesByNode = new Map(S.geom.sources.map((s) => [s.node, s]));
   S.netColor = new Map(S.geom.networks.map((n) => [n.id, n.color]));
   const name = S.file.split(/[\\/]/).pop();
@@ -126,6 +146,48 @@ function applyNetwork(data) {
 }
 
 /* ---------------- Vista ---------------- */
+// Mapa o unifilar: cambian barras, conductores, tramos dibujables (con ambos extremos ubicados), anclajes,
+// rótulos y escala de símbolos. Se llama al cargar la red y al cambiar de vista o de fondo.
+function applyLayout() {
+  const sch = schematic();
+  S.version += 1;
+  S.buses = (sch ? S.geom.unifilar.buses : S.geom.buses) || [];
+  S.busByNode = new Map(S.buses.map((b) => [b.node, b]));
+  const placed = (id) => { const q = point(S.nodes.get(id)); return Number.isFinite(q[0]) && Number.isFinite(q[1]); };
+  S.sections = S.allSections.filter((sec) => placed(sec.from) && placed(sec.to));
+  // Anclajes de cada nodo: sus conductores, su barra y el recorrido de las líneas que llegan a él.
+  S.snap = new Map(); S.wired = false;
+  const snap = (id, seg) => { if (!S.snap.has(id)) S.snap.set(id, []); S.snap.get(id).push(seg); };
+  for (const n of S.nodes.values()) for (const w of nodeWires(n)) { snap(n.id, w); S.wired = true; }
+  for (const b of S.buses) snap(b.node, busWorld(b));
+  for (const sec of S.sections) {
+    if (!sec.devices.some((d) => LINE_TYPES.has(d.type))) continue;
+    const pts = sectionPoints(sec);
+    for (let i = 1; i < pts.length; i++) {
+      const seg = [pts[i - 1][0], pts[i - 1][1], pts[i][0], pts[i][1]];
+      snap(sec.from, seg); snap(sec.to, seg);
+    }
+  }
+  const median = (v) => { const a = v.filter((x) => x > 0).sort((p, q) => p - q); return a.length ? a[a.length >> 1] : 0; };
+  S.symbolUnit = median(S.buses.map((b) => { const w = busWorld(b); return Math.hypot(w[2] - w[0], w[3] - w[1]); }))
+    || median(S.sections.map((sec) => { const a = point(S.nodes.get(sec.from)), b = point(S.nodes.get(sec.to)); return Math.hypot(b[0] - a[0], b[1] - a[1]); }))
+    || 1;
+  S.labels = ((sch ? S.geom.unifilar.labels : S.geom.labels) || []).map((l) => ({ t: l.t, at: sch ? [l.x, l.y] : worldOf(l), above: !sch }))
+    .filter((l) => Number.isFinite(l.at[0]) && Number.isFinite(l.at[1]));
+  $('#mapLayer').disabled = sch;
+  $$('[data-action="view-geographic"]').forEach((b) => b.classList.toggle('active', !sch));
+  $$('[data-action="view-schematic"]').forEach((b) => b.classList.toggle('active', sch));
+  if (S.geom) $('#viewTab').textContent = `${S.geom.networks.map((n) => n.id).join(', ')} - ${sch ? 'Schematic' : 'Geographic'}`;
+}
+function setLayout(layout) {
+  if (layout === 'schematic' && !S.geom?.unifilar) { status('This project has no schematic drawing'); return; }
+  if (S.layout === layout) return;
+  S.layout = layout;
+  applyLayout(); updateCrs(); fitExtents();
+  const u = S.geom.unifilar;
+  status(schematic() ? `Schematic view: source drawing (${u.lines_without_route} lines without a drawn route are dashed; grey = drawn but not in the model)`
+    : 'Geographic view');
+}
 function resize(redraw = true) {
   const r = canvas.getBoundingClientRect();
   canvas.width = Math.max(1, r.width * S.dpr); canvas.height = Math.max(1, r.height * S.dpr);
@@ -134,11 +196,47 @@ function resize(redraw = true) {
 }
 const W = () => canvas.width / S.dpr;
 const H = () => canvas.height / S.dpr;
-const mapEnabled = () => $('#mapLayer').value !== 'none' && !!S.geom?.map_bounds;
-const point = (n) => mapEnabled() ? [n.mx, n.my] : [n.x, n.y];
+const schematic = () => S.layout === 'schematic' && !!S.geom?.unifilar;
+const mapEnabled = () => !schematic() && $('#mapLayer').value !== 'none' && !!S.geom?.map_bounds;
+const point = (n) => schematic() ? [n.ux, n.uy] : mapEnabled() ? [n.mx, n.my] : [n.x, n.y];
 const screenNode = (n) => toScreen(...point(n));
-// Recorrido del tramo: From, puntos intermedios (CYMINTERMEDIATEPOINT, de From a To) y To.
-const sectionPath = (sec) => [S.nodes.get(sec.from), ...(sec.points || []), S.nodes.get(sec.to)].map(screenNode);
+const worldOf = (q) => (mapEnabled() ? [q.mx, q.my] : [q.x, q.y]);
+const LINE_TYPES = new Set(['Underground', 'OverheadLine', 'OverheadLineUnbalanced']);
+// Conductores del nodo en la vista activa (ESQ_TRAZO): [x1, y1, x2, y2, esBarra].
+const nodeWires = (n) => (schematic() ? n.uw : mapEnabled() ? n.mw : n.gw) || [];
+const busWorld = (b) => (mapEnabled() ? [b.mx1, b.my1, b.mx2, b.my2] : [b.x1, b.y1, b.x2, b.y2]);
+// Puntos intermedios del tramo en la vista activa: CYMINTERMEDIATEPOINT en el mapa, el dibujo en el unifilar.
+const sectionPoints = (sec) => ((schematic() ? sec.upoints : sec.points) || []).map(worldOf);
+function nearestOnSegment(q, x1, y1, x2, y2) {
+  const vx = x2 - x1, vy = y2 - y1;
+  const t = Math.max(0, Math.min(1, ((q[0] - x1) * vx + (q[1] - y1) * vy) / (vx * vx + vy * vy || 1)));
+  const x = x1 + t * vx, y = y1 + t * vy;
+  return [(x - q[0]) ** 2 + (y - q[1]) ** 2, x, y];
+}
+// Extremo de un tramo (coordenadas de la vista): el punto de su conector (CYMNODECONNECTOR) o, solo para dibujar,
+// el punto de los conductores o de la barra del nodo más cercano a «toward» (el siguiente punto del tramo).
+function endWorld(id, connector, toward) {
+  const n = S.nodes.get(id), c = !schematic() && n.connectors && n.connectors[connector];
+  if (c) return worldOf(c);
+  const p = point(n), segs = S.snap.get(id);
+  if (!segs || !toward) return p;
+  let best = S.busByNode.has(id) ? null : [(p[0] - toward[0]) ** 2 + (p[1] - toward[1]) ** 2, p[0], p[1]];
+  for (const g of segs) { const r = nearestOnSegment(toward, g[0], g[1], g[2], g[3]); if (!best || r[0] < best[0]) best = r; }
+  return [best[1], best[2]];
+}
+// Recorrido del tramo en coordenadas de la vista: From, puntos intermedios y To. Se guarda hasta que cambie la vista.
+function worldPath(sec) {
+  if (sec._v === S.version) return sec._wp;
+  const pts = sectionPoints(sec);
+  const a = point(S.nodes.get(sec.from)), b = point(S.nodes.get(sec.to));
+  sec._wp = [endWorld(sec.from, sec.from_connector, pts[0] || b), ...pts, endWorld(sec.to, sec.to_connector, pts[pts.length - 1] || a)];
+  sec._v = S.version;
+  return sec._wp;
+}
+const sectionPath = (sec) => worldPath(sec).map((q) => toScreen(...q));
+const endPoint = (id, connector, toward) => toScreen(...endWorld(id, connector, toward));
+const busPath = (b) => { const w = busWorld(b); return [toScreen(w[0], w[1]), toScreen(w[2], w[3])]; };
+const THREE_WINDING = ['ThreeWindingTransformer', 'ThreeWindingAutoTransformer'];
 function strokePath(path) {
   ctx.beginPath(); ctx.moveTo(...path[0]);
   for (let i = 1; i < path.length; i++) ctx.lineTo(...path[i]);
@@ -163,7 +261,7 @@ const toWorld = (sx, sy) => [(sx - S.view.tx) / S.view.s, -(sy - S.view.ty) / S.
 
 function fitExtents(bounds) {
   if (!S.geom) return;
-  const [x0, y0, x1, y1] = bounds || (mapEnabled() ? S.geom.map_bounds : S.geom.bounds);
+  const [x0, y0, x1, y1] = bounds || (schematic() ? S.geom.unifilar.bounds : mapEnabled() ? S.geom.map_bounds : S.geom.bounds);
   const pad = 30;
   const s = Math.min((W() - 2 * pad) / Math.max(x1 - x0, 1), (H() - 2 * pad) / Math.max(y1 - y0, 1));
   S.view.s = s;
@@ -194,10 +292,36 @@ function sectionValue(sec) {
   return null;
 }
 
+// Colores del unifilar por tensión nominal: 500 azul, 220 rojo, 66 verde, 23 marrón.
+const KV_COLORS = [[400, '#1a3fd4'], [150, '#e00000'], [50, '#0a8a1f'], [30, '#b8860b'], [0, '#8b2500']];
+const kvColor = (kv) => (kv ? KV_COLORS.find((c) => kv >= c[0])[1] : '#555');
+function nodeColor(n) {
+  const layer = $('#colorLayer').value;
+  if (layer === 'kv') return kvColor(n.kv);
+  if (layer === 'voltage') {
+    const v = S.last && S.last.nodes ? S.last.nodes[n.id] : null;
+    let worst = null;
+    for (const p of 'ABC') if (v && v[p]) { const x = v[p].pct; if (worst === null || Math.abs(x - 100) > Math.abs(worst - 100)) worst = x; }
+    if (worst === null) return '#b0b0b0';
+    return (LAYERS.voltage.bins.find((b) => worst > b[0] && worst <= b[1]) || LAYERS.voltage.bins[0])[2];
+  }
+  if (layer === 'loading') return '#b0b0b0';
+  if (layer === 'default' && S.cyme && S.cyme.items.Node) return S.cyme.items.Node.color;
+  return S.netColor.get(n.network) || '#1f2f6b';
+}
+
 function styleFor(sec) {
   const layer = $('#colorLayer').value;
   const multi = sec.phases.length === 3;
-  const base = { color: S.netColor.get(sec.network) || '#1f3a93', width: multi ? 2 : 1, dash: multi ? [] : [8, 3, 2, 3] };
+  const base = { color: S.netColor.get(sec.network) || '#1f3a93', width: multi ? (S.wired && (schematic() || !sec.devices.some((d) => LINE_TYPES.has(d.type))) ? 1.4 : 2) : 1, dash: multi ? [] : [8, 3, 2, 3] };
+  if (schematic() && sec.uguess) base.dash = [6, 4];
+  if (layer === 'kv') return { ...base, color: kvColor(sec.kv) };
+  if (layer === 'default' && S.cyme) {
+    // Capa «Default Symbols» de CYME: color, grosor y trazo por fases y por tipo (aéreo o cable).
+    const cable = sec.devices.some((d) => d.type === 'Underground');
+    const item = S.cyme.items[(cable ? 'UG' : 'OH') + 'Phase' + (multi ? 'Tri' : sec.phases)];
+    if (item) return { color: item.color, width: S.wired ? Math.min(item.width, 1.4) : item.width, dash: schematic() && sec.uguess ? [6, 4] : item.dash };
+  }
   if (layer === 'phase') {
     const bin = LAYERS.phase.bins.find((b) => b[0] === sec.phases);
     return { ...base, color: bin ? bin[1] : '#555' };
@@ -264,18 +388,26 @@ function draw() {
     strokePath(sectionPath(sec));
   }
   ctx.lineCap = 'butt';
+  if (sel && sel.kind === 'node' && S.nodes.has(sel.id)) drawWires(S.nodes.get(sel.id), 'rgba(51,153,255,.45)', 7);
+  if (schematic()) drawExtra();
   for (const sec of S.sections) {
     const st = styleFor(sec);
     const path = sectionPath(sec);
     if (offScreen(path, 20)) continue;
     ctx.strokeStyle = st.color; ctx.lineWidth = st.width; ctx.setLineDash(st.dash);
     strokePath(path);
+    const leg = tertiaryLeg(sec, path);
+    if (leg) strokePath(leg);
   }
   ctx.setLineDash([]);
-  const zoomed = S.view.s > 0.08;
+  if (S.wired) for (const n of S.nodes.values()) drawWires(n, nodeColor(n), 1.4);
+  if (S.cyme && !S.wired && symbolSide() >= 16) drawMultipoints();
+  drawBuses();
+  const zoomed = detailed();
   if ($('#showDevices').checked) drawDevices(zoomed);
   if (zoomed) drawNodes();
   drawSources();
+  drawLabels();
   if (sel && sel.kind === 'node' && S.nodes.has(sel.id)) {
     const n = S.nodes.get(sel.id); const [x, y] = screenNode(n);
     ctx.fillStyle = '#1e88e5';
@@ -286,9 +418,117 @@ function draw() {
   renderLegend();
 }
 
+// Conductores de un nodo como en el dibujo de origen; los segmentos-barra van gruesos si el nodo no tiene barra propia.
+function drawWires(n, color, width) {
+  const wires = nodeWires(n);
+  if (!wires.length) return;
+  const hasBus = S.busByNode.has(n.id);
+  ctx.strokeStyle = color;
+  for (const w of wires) {
+    if (w[4] && hasBus && width < 5) continue;
+    const a = toScreen(w[0], w[1]), b = toScreen(w[2], w[3]);
+    if (Math.max(a[0], b[0]) < -5 || Math.min(a[0], b[0]) > W() + 5 || Math.max(a[1], b[1]) < -5 || Math.min(a[1], b[1]) > H() + 5) continue;
+    ctx.lineWidth = w[4] && width < 5 ? busWidth() : width;
+    ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
+  }
+}
+// Conductores del dibujo que no quedaron en ningún nodo ni línea del modelo: en gris, para ver qué falta.
+function drawExtra() {
+  ctx.strokeStyle = '#c8c8c8'; ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (const w of S.geom.unifilar.extra || []) {
+    const a = toScreen(w[0], w[1]), b = toScreen(w[2], w[3]);
+    ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]);
+  }
+  ctx.stroke();
+}
+const busWidth = () => Math.max(2.5, Math.min(7, 3.2 * symbolScale()));
+
+// Posición de un equipo sobre su tramo. Si el tramo no es una línea y tiene un único punto intermedio, ese punto es
+// el lugar del equipo en el dibujo (interruptor en su bahía, transformador entre barras).
+function deviceAnchor(sec, d, path) {
+  if (path.length === 3 && !sec.devices.some((x) => LINE_TYPES.has(x.type))) {
+    const [a, m, b] = path;
+    return [m[0], m[1], Math.atan2(b[1] - a[1], b[0] - a[0]), Infinity];
+  }
+  const [a, b] = pathSegment(path, d.location);
+  return devicePoint(sec, d.location, a, b);
+}
+
+// Pata del terciario: del símbolo del transformador de tres devanados a su nodo (CYMSECTIONNODE).
+function tertiaryLeg(sec, path) {
+  if (!sec.tertiary || !S.nodes.has(sec.tertiary)) return null;
+  const d = sec.devices.find((x) => THREE_WINDING.includes(x.type)) || { location: 'Middle' };
+  const [x, y] = deviceAnchor(sec, d, path);
+  return [[x, y], endPoint(sec.tertiary, sec.tertiary_connector, toWorld(x, y))];
+}
+
+// Barras (CYMBUSDISPLAY o el dibujo): trazo grueso con el color del nodo y su nombre al acercarse.
+function drawBuses() {
+  ctx.lineCap = 'butt';
+  const names = S.view.s * (S.symbolUnit || 1) >= (S.wired ? 70 : 25);
+  for (const b of S.buses) {
+    const path = busPath(b);
+    if (offScreen(path, 10)) continue;
+    const n = S.nodes.get(b.node);
+    ctx.strokeStyle = n ? nodeColor(n) : '#1f2f6b';
+    ctx.lineWidth = S.wired ? busWidth() : Math.max(4, Math.min(8, S.view.s * 3));
+    strokePath(path);
+    if (names) {
+      const [x, y] = path[0][0] > path[1][0] ? path[0] : path[1];
+      ctx.fillStyle = '#1f2f6b'; ctx.font = '600 10px Segoe UI'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle'; ctx.fillText(b.node, x + 6, y);
+      ctx.textBaseline = 'alphabetic';
+    }
+  }
+}
+
+// Rótulos de estación: los del dibujo en el unifilar; en el mapa, sobre el dibujo de cada estación. Sin encimarse.
+function drawLabels() {
+  if (!S.labels.length) return;
+  const size = schematic() ? Math.max(10, Math.min(26, S.view.s * 9)) : Math.max(10, Math.min(15, 10 * symbolScale()));
+  ctx.font = `700 ${size}px Segoe UI`; ctx.textAlign = 'center'; ctx.lineJoin = 'round';
+  const taken = [];
+  for (const l of S.labels) {
+    const [x, y0] = toScreen(...l.at);
+    const y = l.above ? y0 - 6 : y0;
+    if (x < -60 || y < -20 || x > W() + 60 || y > H() + 20) continue;
+    const w = ctx.measureText(l.t).width / 2 + 2;
+    const box = [x - w, y - (l.above ? size : size / 2), x + w, y + (l.above ? 2 : size / 2)];
+    if (taken.some((t) => box[0] < t[2] && t[0] < box[2] && box[1] < t[3] && t[1] < box[3])) continue;
+    taken.push(box);
+    ctx.textBaseline = l.above ? 'alphabetic' : 'middle';
+    ctx.strokeStyle = 'rgba(255,255,255,.9)'; ctx.lineWidth = 3; ctx.strokeText(l.t, x, y);
+    ctx.fillStyle = '#222'; ctx.fillText(l.t, x, y);
+  }
+  ctx.textBaseline = 'alphabetic';
+}
+
+// Puntos intermedios de los tramos y conectores de las barras: CYME los muestra en rojo (capa por defecto).
+function drawMultipoints() {
+  const mp = S.cyme.items.Multipoint, cn = S.cyme.items.Connector;
+  const r = Math.max(1.5, symbolSide() * 0.06);
+  if (mp && mp.displayed) {
+    ctx.fillStyle = mp.color;
+    for (const sec of S.sections) for (const q of sectionPoints(sec)) {
+      const [x, y] = toScreen(...q);
+      if (x < 0 || y < 0 || x > W() || y > H()) continue;
+      ctx.fillRect(x - r, y - r, 2 * r, 2 * r);
+    }
+  }
+  if (cn && cn.displayed && !schematic()) {
+    ctx.fillStyle = cn.color;
+    for (const n of S.nodes.values()) for (const c of Object.values(n.connectors || {})) {
+      const [x, y] = toScreen(...worldOf(c));
+      if (x < 0 || y < 0 || x > W() || y > H()) continue;
+      ctx.beginPath(); ctx.arc(x, y, r, 0, 2 * Math.PI); ctx.fill();
+    }
+  }
+}
+
 function drawNodes() {
   ctx.fillStyle = '#1f2f6b';
   for (const n of S.nodes.values()) {
+    if (S.busByNode.has(n.id) || nodeWires(n).length) continue;  // la barra o sus conductores ya representan al nodo
     const [x, y] = screenNode(n);
     if (x < -5 || y < -5 || x > W() + 5 || y > H() + 5) continue;
     ctx.beginPath(); ctx.arc(x, y, 2.2, 0, 2 * Math.PI); ctx.fill();
@@ -297,30 +537,170 @@ function drawNodes() {
 
 function devicePoint(sec, loc, a, b) {
   const len = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
-  const off = Math.min(14, len * 0.3) / len;
+  const off = Math.min(14 * symbolScale(), len * 0.3) / len;
   const t = loc === 'From' ? off : loc === 'Middle' ? 0.5 : 1 - off;
   return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, Math.atan2(b[1] - a[1], b[0] - a[0]), len];
 }
 
 function drawDevices(zoomed) {
+  // Con el dibujo de origen, muy de lejos los equipos de una estación serían una mancha: no se dibujan.
+  if (S.wired && S.view.s * S.symbolUnit / 60 < 0.07) return;
   for (const sec of S.sections) {
     const path = sectionPath(sec);
     if (offScreen(path, 0)) continue;
     for (const d of sec.devices) {
-      const major = ['Regulator', 'Recloser', 'Breaker', 'ShuntCapacitor'].includes(d.type);
+      const major = MAJOR.includes(d.type);
       if (!zoomed && !major) continue;
-      const [a, b] = pathSegment(path, d.location);
-      const [x, y, ang, len] = devicePoint(sec, d.location, a, b);
-      if (len < 18 && !major) continue;
+      if (isStub(sec)) {
+        // El símbolo va al extremo sin barra, mirando hacia afuera (eje y local a lo largo del tramo).
+        const reverse = S.busByNode.has(sec.to) && !S.busByNode.has(sec.from);
+        const [a, b] = reverse ? [path[1], path[0]] : [path[path.length - 2], path[path.length - 1]];
+        if (Math.hypot(b[0] - a[0], b[1] - a[1]) < 6) continue;  // tramo diminuto en pantalla: sin símbolo
+        symbol(d, b[0], b[1], Math.atan2(b[1] - a[1], b[0] - a[0]) - Math.PI / 2, sec, true);
+        continue;
+      }
+      const [x, y, ang, len] = deviceAnchor(sec, d, path);
+      // Como CYME: sin símbolo si el tramo es diminuto en pantalla (los mayores aguantan más).
+      if (len < (major ? 6 : 18)) continue;
       symbol(d, x, y, ang, sec);
     }
   }
 }
 
-function symbol(d, x, y, ang, sec) {
+// Detalle (nodos, nombres) cuando una barra típica ocupa al menos ~25 px: vale para metros y para puntos del PDF.
+const detailed = () => S.view.s * (S.symbolUnit || 1) >= 25;
+// Con el dibujo de origen los símbolos se achican al alejarse (hasta 0,3) para no tapar los conductores.
+const symbolScale = () => Math.min(2.5, Math.max(S.wired ? 0.3 : 1, S.view.s * S.symbolUnit / 60));
+// Tramo que solo conecta un equipo shunt a la barra (generador, carga, capacitor...): sin equipo serie.
+const SERIES_TYPES = new Set(['Underground', 'OverheadLine', 'OverheadLineUnbalanced', 'Regulator', 'Transformer',
+  'AutoTransformer', 'ThreeWindingTransformer', 'ThreeWindingAutoTransformer', 'Breaker', 'Recloser', 'Sectionalizer',
+  'Switch', 'Fuse']);
+const isStub = (sec) => sec.devices.length > 0 && sec.devices.every((d) => !SERIES_TYPES.has(d.type));
+const MAJOR = ['Regulator', 'Recloser', 'Breaker', 'ShuntCapacitor', 'Transformer', 'AutoTransformer',
+  'ThreeWindingTransformer', 'ThreeWindingAutoTransformer', 'SynchronousGenerator', 'ShuntReactor', 'SVC', 'Statcom'];
+const circle = (x, y, r) => { ctx.beginPath(); ctx.arc(x, y, r, 0, 2 * Math.PI); ctx.fill(); ctx.stroke(); };
+function boxLabel(text, w) {
+  ctx.fillRect(-w / 2, -7, w, 14); ctx.strokeRect(-w / 2, -7, w, 14);
+  ctx.fillStyle = ctx.strokeStyle; ctx.font = 'bold 8px Segoe UI'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(text, 0, 0.5);
+}
+// Equipo shunt colgado del tramo: bajada perpendicular y el símbolo al pie (eje y local hacia abajo).
+function hang(ang, length) {
+  ctx.rotate(ang); ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(0, length); ctx.stroke(); ctx.translate(0, length);
+}
+
+// Lado en pantalla del cuadro unitario de un símbolo de CYME: crece con el zoom, como en CYME.
+const symbolSide = () => 14 * symbolScale();
+const SWITCHING_TYPES = new Set(['Breaker', 'Recloser', 'Sectionalizer', 'Switch', 'Fuse']);
+
+// Dibuja el equipo con el símbolo vectorial de CYME (BaseSymbols.cfg) y el estilo de su capa por defecto.
+// Coordenadas del símbolo: cuadro unitario con Y hacia arriba. Un equipo serie va de su puerto de entrada al de
+// salida a lo largo del tramo; uno shunt cuelga de su puerto, hacia afuera. Devuelve false si CYME no lo define.
+function cymeSymbol(d, x, y, ang, sec) {
+  const states = S.cyme && S.cyme.devices[d.type];
+  if (!states) return false;
+  const open = d.closed !== undefined && d.closed.length < sec.phases.length;
+  const conf = (open && states.Open) || states.Normal || Object.values(states)[0];
+  const sym = conf && S.cyme.symbols[conf.symbol];
+  if (!sym || !conf.displayed) return false;
+  const side = symbolSide() * conf.size;
+  const color = $('#colorLayer').value === 'default' ? conf.color : styleFor(sec).color;
+  const pin = sym.in || [0.5, 0.5], pout = sym.out || pin;
+  const series = pin[0] !== pout[0] || pin[1] !== pout[1];
+  ctx.save(); ctx.translate(x, y);
+  let rot;
+  if (series) {
+    rot = ang;
+    ctx.rotate(rot); ctx.scale(side, -side); ctx.translate(-(pin[0] + pout[0]) / 2, -(pin[1] + pout[1]) / 2);
+    // El símbolo trae sus propias bajadas: se borra el tramo debajo, de puerto a puerto.
+    ctx.save(); ctx.globalCompositeOperation = 'destination-out'; ctx.lineWidth = 6 / side; ctx.beginPath();
+    ctx.moveTo(pin[0], pin[1]); ctx.lineTo(pout[0], pout[1]); ctx.stroke(); ctx.restore();
+  } else {
+    // «Afuera» en pantalla es el eje y local tras rotate(ang) (convención de symbol()); en el símbolo, del puerto al centro.
+    rot = ang + Math.PI / 2 - Math.atan2(-(0.5 - pin[1]), 0.5 - pin[0]);
+    ctx.rotate(rot); ctx.scale(side, -side); ctx.translate(-pin[0], -pin[1]);
+  }
+  ctx.strokeStyle = color; ctx.lineJoin = 'round';
+  // Hipótesis de dibujo: un equipo de maniobra cerrado rellena sus polígonos; abierto, quedan huecos.
+  const solid = SWITCHING_TYPES.has(d.type) && !open;
+  for (const e of sym.elements) {
+    ctx.lineWidth = Math.max(1, e.w) * 1.2 / side;
+    const q = e.p;
+    if (e.k === 'text') {
+      const text = e.text === '$Phase$' ? sec.phases : e.text;
+      if (text.includes('$') || side < 10) continue;
+      ctx.save(); ctx.translate(q[0][0], q[0][1]); ctx.scale(1 / side, -1 / side); ctx.rotate(-rot);
+      ctx.fillStyle = color; ctx.font = `600 ${Math.max(6, side * e.h * 0.12)}px Segoe UI`; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+      ctx.fillText(text, 0, 0); ctx.restore();
+      continue;
+    }
+    ctx.beginPath();
+    if (e.k === 'ellipse') {
+      ctx.ellipse((q[0][0] + q[1][0]) / 2, (q[0][1] + q[1][1]) / 2, Math.abs(q[0][0] - q[1][0]) / 2, Math.abs(q[0][1] - q[1][1]) / 2, 0, 0, 2 * Math.PI);
+    } else if (e.k === 'spline' && q.length >= 4) {
+      ctx.moveTo(q[0][0], q[0][1]);
+      for (let i = 1; i + 2 < q.length; i += 3) ctx.bezierCurveTo(q[i][0], q[i][1], q[i + 1][0], q[i + 1][1], q[i + 2][0], q[i + 2][1]);
+    } else {
+      ctx.moveTo(q[0][0], q[0][1]);
+      for (let i = 1; i < q.length; i++) ctx.lineTo(q[i][0], q[i][1]);
+      if (e.k === 'polygon') ctx.closePath();
+    }
+    if (e.k === 'polygon' || e.k === 'ellipse') {
+      ctx.fillStyle = e.fill || solid ? color : '#fff';
+      ctx.fill();
+    }
+    ctx.stroke();
+  }
+  ctx.restore();
+  return true;
+}
+
+function symbol(d, x, y, ang, sec, stub = false) {
+  if (cymeSymbol(d, x, y, ang, sec)) return;
   const c = styleFor(sec).color;
-  ctx.save(); ctx.translate(x, y); ctx.lineWidth = 1.2; ctx.strokeStyle = c; ctx.fillStyle = '#fff';
+  const k = symbolScale();
+  ctx.save(); ctx.translate(x, y); ctx.scale(k, k); ctx.lineWidth = 1.2; ctx.strokeStyle = c; ctx.fillStyle = '#fff';
+  const drop = stub ? 0 : 1;  // en un tramo de conexión el propio tramo es la bajada
   switch (d.type) {
+    case 'Transformer':
+    case 'AutoTransformer':
+      // Dos círculos cruzados sobre el tramo; el autotransformador lleva la flecha de toma variable.
+      ctx.rotate(ang); ctx.strokeStyle = '#7a1f1f'; ctx.lineWidth = 1.4;
+      circle(-4, 0, 6); ctx.fillStyle = 'rgba(255,255,255,0)'; circle(4, 0, 6);
+      if (d.type === 'AutoTransformer') {
+        ctx.beginPath(); ctx.moveTo(-8, 8); ctx.lineTo(8, -8); ctx.moveTo(4, -8); ctx.lineTo(8, -8); ctx.lineTo(8, -4); ctx.stroke();
+      }
+      break;
+    case 'ThreeWindingTransformer':
+    case 'ThreeWindingAutoTransformer':
+      ctx.rotate(ang); ctx.strokeStyle = '#7a1f1f'; ctx.lineWidth = 1.4;
+      circle(-4, -2.5, 5.5); ctx.fillStyle = 'rgba(255,255,255,0)'; circle(4, -2.5, 5.5); circle(0, 4, 5.5);
+      if (d.type === 'ThreeWindingAutoTransformer') {
+        ctx.beginPath(); ctx.moveTo(-9, 9); ctx.lineTo(9, -9); ctx.stroke();
+      }
+      break;
+    case 'SynchronousGenerator':
+      hang(ang, 6 * drop); ctx.strokeStyle = '#0b3d91'; ctx.lineWidth = 1.5; circle(0, 8, 8);
+      ctx.beginPath(); ctx.moveTo(-5, 8); ctx.bezierCurveTo(-3, 2, -1, 2, 0, 8); ctx.bezierCurveTo(1, 14, 3, 14, 5, 8); ctx.stroke();
+      break;
+    case 'ShuntReactor':
+      hang(ang, 4 * drop); ctx.strokeStyle = '#5b2c83'; ctx.lineWidth = 1.5; ctx.beginPath();
+      for (let i = 0; i < 3; i++) ctx.arc(0, 3 + i * 5, 2.5, -Math.PI / 2, Math.PI / 2);
+      ctx.moveTo(-5, 19); ctx.lineTo(5, 19); ctx.stroke();
+      break;
+    case 'SVC':
+    case 'Statcom':
+      hang(ang, 6 * drop); ctx.strokeStyle = '#5b2c83'; ctx.translate(0, 8); ctx.rotate(-ang); boxLabel(d.type === 'SVC' ? 'SVC' : 'STAT', 24);
+      break;
+    case 'Sectionalizer':
+      ctx.rotate(ang); ctx.strokeStyle = '#000'; ctx.fillStyle = (d.closed || '').length ? '#fff' : '#ddd';
+      ctx.fillRect(-6, -6, 12, 12); ctx.strokeRect(-6, -6, 12, 12);
+      ctx.rotate(-ang); ctx.fillStyle = '#000'; ctx.font = 'bold 9px Segoe UI'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('S', 0, 0.5);
+      break;
+    case 'DistributedLoad':
+      ctx.rotate(ang); ctx.fillStyle = c;
+      for (const dx of [-8, 0, 8]) { ctx.beginPath(); ctx.moveTo(dx - 3, 3); ctx.lineTo(dx + 3, 3); ctx.lineTo(dx, 8); ctx.closePath(); ctx.fill(); }
+      break;
     case 'Regulator':
       ctx.strokeStyle = '#0b3d91'; ctx.beginPath(); ctx.arc(0, 0, 7, 0, 2 * Math.PI); ctx.fill(); ctx.stroke();
       ctx.beginPath(); ctx.moveTo(-5, 5); ctx.lineTo(5, -5); ctx.moveTo(1, -5); ctx.lineTo(5, -5); ctx.lineTo(5, -1); ctx.stroke();
@@ -343,7 +723,7 @@ function symbol(d, x, y, ang, sec) {
       ctx.beginPath(); ctx.moveTo(-6, 0); ctx.lineTo(6, 0); ctx.stroke();
       break;
     case 'ShuntCapacitor':
-      ctx.rotate(ang + Math.PI / 2); ctx.strokeStyle = '#006400'; ctx.lineWidth = 2;
+      ctx.rotate(stub ? ang : ang + Math.PI / 2); ctx.strokeStyle = '#006400'; ctx.lineWidth = 2;
       ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(0, 6); ctx.moveTo(-6, 6); ctx.lineTo(6, 6); ctx.moveTo(-6, 10); ctx.lineTo(6, 10); ctx.stroke();
       break;
     case 'SpotLoad':
@@ -360,13 +740,19 @@ function symbol(d, x, y, ang, sec) {
 function drawSources() {
   for (const src of S.geom.sources) {
     const n = S.nodes.get(src.node); if (!n) continue;
-    const [x, y] = screenNode(n);
-    ctx.save(); ctx.translate(x, y - 16);
+    const bus = S.busByNode.get(n.id);
+    const [x, y] = bus && S.wired ? busPath(bus)[0] : screenNode(n);
+    if (S.wired && S.view.s * S.symbolUnit / 60 < 0.07) { ctx.fillStyle = '#0b3d91'; ctx.fillRect(x - 3, y - 3, 6, 6); continue; }
+    if (cymeSymbol({ type: 'Source' }, x, y, Math.PI, { phases: 'ABC', devices: [], network: n.network, kv: n.kv })) {
+      if (detailed()) { ctx.fillStyle = '#0b3d91'; ctx.font = '600 11px Segoe UI'; ctx.textAlign = 'left'; ctx.fillText(src.id, x + symbolSide() * 0.5 + 3, y - symbolSide() * 0.5); }
+      continue;
+    }
+    ctx.save(); ctx.translate(x, y); ctx.scale(symbolScale(), symbolScale()); ctx.translate(0, -16);
     ctx.strokeStyle = '#0b3d91'; ctx.fillStyle = '#fff'; ctx.lineWidth = 1.5;
     ctx.beginPath(); ctx.moveTo(0, 9); ctx.lineTo(0, 16); ctx.stroke();
     ctx.beginPath(); ctx.arc(0, 0, 9, 0, 2 * Math.PI); ctx.fill(); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(-5, 0); ctx.bezierCurveTo(-3, -6, -1, -6, 0, 0); ctx.bezierCurveTo(1, 6, 3, 6, 5, 0); ctx.stroke();
-    ctx.fillStyle = '#0b3d91'; ctx.font = '600 11px Segoe UI'; ctx.textAlign = 'left'; ctx.fillText(src.id, 12, 4);
+    ctx.fillStyle = '#0b3d91'; ctx.font = '600 11px Segoe UI'; ctx.textAlign = 'left'; if (detailed()) ctx.fillText(src.id, 12, 4);
     ctx.restore();
   }
 }
@@ -412,6 +798,14 @@ function drawTags() {
 function renderLegend() {
   const layer = $('#colorLayer').value;
   const el = $('#legend');
+  if (layer === 'kv') {
+    el.hidden = false;
+    el.innerHTML = '<div class="title">Nominal voltage (kV)</div>' + (S.geom.kv_levels || []).map((kv) =>
+      `<div class="row"><i style="border-top:3px solid ${kvColor(kv)}"></i>${kv}</div>`).join('')
+      + (schematic() ? '<div class="row"><i style="border-top:2px dashed #555"></i>no route in drawing</div><div class="row"><i style="border-top:2px solid #c8c8c8"></i>drawn, not in model</div>' : '');
+    return;
+  }
+  if (layer === 'default') { el.hidden = true; return; }
   if (layer === 'network') {
     el.hidden = false;
     el.innerHTML = '<div class="title">Network color</div>' + S.geom.networks.map((n) =>
@@ -435,6 +829,14 @@ function hitTest(sx, sy) {
     if (d < 6 && (!best || d < best.d)) best = { kind: 'node', id: n.id, d };
   }
   if (best) return best;
+  for (const b of S.buses) {
+    const [a, c] = busPath(b);
+    const vx = c[0] - a[0], vy = c[1] - a[1];
+    const t = Math.max(0, Math.min(1, ((sx - a[0]) * vx + (sy - a[1]) * vy) / (vx * vx + vy * vy || 1)));
+    const d = Math.hypot(a[0] + t * vx - sx, a[1] + t * vy - sy);
+    if (d < 6 && S.nodes.has(b.node) && (!best || d < best.d)) best = { kind: 'node', id: b.node, d };
+  }
+  if (best) return best;
   for (const sec of S.sections) {
     const path = sectionPath(sec);
     for (let i = 1; i < path.length; i++) {
@@ -443,6 +845,14 @@ function hitTest(sx, sy) {
       const t = Math.max(0, Math.min(1, ((sx - a[0]) * vx + (sy - a[1]) * vy) / (vx * vx + vy * vy || 1)));
       const d = Math.hypot(a[0] + t * vx - sx, a[1] + t * vy - sy);
       if (d < 5 && (!best || d < best.d)) best = { kind: 'section', id: sec.id, d };
+    }
+  }
+  if (best || !S.wired) return best;
+  const q = toWorld(sx, sy), reach = (4 / S.view.s) ** 2;
+  for (const n of S.nodes.values()) {
+    for (const w of nodeWires(n)) {
+      const d = nearestOnSegment(q, w[0], w[1], w[2], w[3])[0];
+      if (d < reach && (!best || d < best.d)) best = { kind: 'node', id: n.id, d };
     }
   }
   return best;
@@ -454,7 +864,15 @@ canvas.addEventListener('mousedown', (e) => {
   hideContextMenu();
   const hit = S.edit && !S.pending ? hitTest(e.offsetX, e.offsetY) : null;
   // En modo edición, arrastrar un nodo lo mueve; en otro caso se desplaza la vista.
-  const node = hit && hit.kind === 'node' ? S.nodes.get(hit.id) : null;
+  let node = hit && hit.kind === 'node' ? S.nodes.get(hit.id) : null;
+  if (node && schematic()) {
+    status('Nodes are moved in the Geographic view; the Schematic view shows the source drawing');
+    node = null;
+  }
+  if (node && (node.connectors || S.busByNode.has(node.id) || nodeWires(node).length)) {
+    status('Moving a bus is not supported yet: its bar and connectors would stay in place');
+    node = null;
+  }
   drag = { x: e.offsetX, y: e.offsetY, tx: S.view.tx, ty: S.view.ty, moved: false, node, start: node && point(node) };
 });
 window.addEventListener('mouseup', (e) => {
@@ -508,15 +926,18 @@ function tooltip(hit, x, y) {
 }
 
 function zoomTo(hit) {
-  let x0, y0, x1, y1;
-  if (hit.kind === 'node') { const [x, y] = point(S.nodes.get(hit.id)); [x0, y0, x1, y1] = [x - 150, y - 150, x + 150, y + 150]; }
-  else {
-    const sec = S.sectionById.get(hit.id);
-    const pts = [S.nodes.get(sec.from), ...(sec.points || []), S.nodes.get(sec.to)].map(point);
-    const xs = pts.map((q) => q[0]), ys = pts.map((q) => q[1]);
-    [x0, y0, x1, y1] = [Math.min(...xs) - 150, Math.min(...ys) - 150, Math.max(...xs) + 150, Math.max(...ys) + 150];
+  if (hit.kind === 'node') {
+    const node = S.nodes.get(hit.id), wires = nodeWires(node), b = S.busByNode.get(hit.id);
+    const segs = wires.length ? wires : b ? [busWorld(b)] : [[...point(node), ...point(node)]];
+    const xs = segs.flatMap((w) => [w[0], w[2]]), ys = segs.flatMap((w) => [w[1], w[3]]);
+    const m = Math.max((Math.max(...xs) - Math.min(...xs)) * 0.6, (Math.max(...ys) - Math.min(...ys)) * 0.6, S.wired ? 3 * S.symbolUnit : 150);
+    fitExtents([Math.min(...xs) - m, Math.min(...ys) - m, Math.max(...xs) + m, Math.max(...ys) + m]);
+    return;
   }
-  fitExtents([x0, y0, x1, y1]);
+  const pts = worldPath(S.sectionById.get(hit.id));
+  const pad = S.wired ? 4 * S.symbolUnit : 150;
+  const xs = pts.map((q) => q[0]), ys = pts.map((q) => q[1]);
+  fitExtents([Math.min(...xs) - pad, Math.min(...ys) - pad, Math.max(...xs) + pad, Math.max(...ys) + pad]);
 }
 
 async function select(hit) {
@@ -531,9 +952,16 @@ async function select(hit) {
 }
 
 /* ---------------- Explorador ---------------- */
-const GROUP_ORDER = ['Source', 'Meter', 'Regulator', 'Breaker', 'Recloser', 'Fuse', 'Switch', 'ShuntCapacitor'];
-const GROUP_LABEL = { Source: 'Sources', Meter: 'Meters', Regulator: 'Regulators', Breaker: 'Breakers', Recloser: 'Reclosers', Fuse: 'Fuses', Switch: 'Switches', ShuntCapacitor: 'Shunt Capacitors' };
-const GROUP_COLOR = { Source: '#0b3d91', Meter: '#7a4a00', Regulator: '#0b3d91', Breaker: '#c00000', Recloser: '#0b3d91', Fuse: '#555', Switch: '#000', ShuntCapacitor: '#006400' };
+const GROUP_ORDER = ['Source', 'Meter', 'SynchronousGenerator', 'Transformer', 'AutoTransformer', 'ThreeWindingTransformer',
+  'ThreeWindingAutoTransformer', 'Regulator', 'Breaker', 'Recloser', 'Sectionalizer', 'Fuse', 'Switch', 'ShuntCapacitor',
+  'ShuntReactor', 'SVC', 'Statcom'];
+const GROUP_LABEL = { Source: 'Sources', Meter: 'Meters', Regulator: 'Regulators', Breaker: 'Breakers', Recloser: 'Reclosers', Fuse: 'Fuses', Switch: 'Switches', ShuntCapacitor: 'Shunt Capacitors',
+  SynchronousGenerator: 'Synchronous Generators', Transformer: 'Transformers', AutoTransformer: 'Auto-Transformers',
+  ThreeWindingTransformer: 'Three-Winding Transformers', ThreeWindingAutoTransformer: 'Three-Winding Auto-Transformers',
+  Sectionalizer: 'Sectionalizers', ShuntReactor: 'Shunt Reactors', SVC: 'SVCs', Statcom: 'STATCOMs' };
+const GROUP_COLOR = { Source: '#0b3d91', Meter: '#7a4a00', Regulator: '#0b3d91', Breaker: '#c00000', Recloser: '#0b3d91', Fuse: '#555', Switch: '#000', ShuntCapacitor: '#006400',
+  SynchronousGenerator: '#0b3d91', Transformer: '#7a1f1f', AutoTransformer: '#7a1f1f', ThreeWindingTransformer: '#7a1f1f',
+  ThreeWindingAutoTransformer: '#7a1f1f', Sectionalizer: '#000', ShuntReactor: '#5b2c83', SVC: '#5b2c83', Statcom: '#5b2c83' };
 
 function renderExplorer() {
   const html = ['<ul class="tree root">'];
@@ -1153,7 +1581,7 @@ function toggleEdit(on = !S.edit) {
   status(on ? 'Edit mode: drag nodes to move them, right-click a section or node for more actions' : 'Edit mode off');
 }
 
-function setPoint(n, [wx, wy]) { if (mapEnabled()) { n.mx = wx; n.my = wy; } else { n.x = wx; n.y = wy; } }
+function setPoint(n, [wx, wy]) { S.version += 1; if (mapEnabled()) { n.mx = wx; n.my = wy; } else { n.x = wx; n.y = wy; } }
 
 async function edit(op, path = 'edit') {
   if (!S.file) return null;
@@ -1404,6 +1832,8 @@ function action(name) {
     case 'open': openFileDialog(); break;
     case 'reload': if (S.file) openFile(S.file); break;
     case 'zoom-extents': fitExtents(); break;
+    case 'view-geographic': setLayout('geographic'); break;
+    case 'view-schematic': setLayout('schematic'); break;
     case 'zoom-in': zoomAt(1.5); break;
     case 'zoom-out': zoomAt(1 / 1.5); break;
     case 'toggle-explorer': $('#workspace').classList.toggle('no-explorer'); setTimeout(resize); break;
@@ -1457,7 +1887,7 @@ function changeMapLayer() {
   previousMapLayer = $('#mapLayer').value;
   updateMapAttribution();
   updateCrs();
-  if (changedProjection) fitExtents();
+  if (changedProjection) { applyLayout(); fitExtents(); }
   else draw();
 }
 ['colorLayer', 'tagLayer', 'showDevices'].forEach((id) => $('#' + id).addEventListener('change', draw));

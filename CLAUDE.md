@@ -14,13 +14,13 @@ SQLite, interpreta su semántica y calcula **flujo de carga desbalanceado** y
 por **ingeniería inversa** y se valida contra CYME real mediante el MCP hermano.
 Ñandu no importa código de CYME ni del MCP y no necesita CYME para funcionar.
 
-Versión actual: 0.15.0 (`nandu/__init__.py`, `pyproject.toml`). Ambiente: Windows,
+Versión actual: 0.16.0 (`nandu/__init__.py`, `pyproject.toml`). Ambiente: Windows,
 PowerShell, Python 3.11. Documentación, mensajes y docstrings en español.
 
 ## Comandos
 
 ```powershell
-# Pruebas completas (153; las de OpenDSS y del motor nodal se omiten sin sus paquetes)
+# Pruebas completas (171; las de OpenDSS y del motor nodal se omiten sin sus paquetes)
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 # Una prueba
 .\.venv\Scripts\python.exe -m unittest tests.test_nodal.RegulatorTests.test_closed_delta_relation_and_power_conservation -v
@@ -76,7 +76,7 @@ JSON nandu-electrical-network-v1 --powerflow (OpenDSS)--> validación independie
 | `nandu/tables_import.py` | JSON `nandu-cyme-tables-v1` (tablas ya en códigos Access, con procedencia y convenciones) → `.nandu.sqlite`. Lo produce `eventos_ens/esquema/exportar_cyme.py` para el SIN | stdlib |
 | `nandu/sxst_export.py` | Proyecto → `.sxst` por ida y vuelta: diferencias con el estudio original escritas sobre sus bytes (expat), verificadas reimportando | stdlib |
 | `nandu/analysis.py` | Informes JSON y comparación con CSV de CYME | numpy, scipy |
-| `nandu/ui/` | Interfaz tipo CYME: `server.py` (http.server, solo 127.0.0.1), `service.py` (geometría, propiedades, informes), `editing.py` (edición de tablas CYME, lecturas de medidor incluidas, con deshacer y diario; Save As a proyecto nuevo), `static/` (HTML/JS/CSS sin dependencias) | stdlib; numpy/scipy al calcular |
+| `nandu/ui/` | Interfaz tipo CYME: `server.py` (http.server, solo 127.0.0.1), `service.py` (geometría, propiedades, informes), `cyme_symbols.py` (símbolos y capa por defecto leídos de la instalación local de CYME, sin copiarlos), `editing.py` (edición de tablas CYME, lecturas de medidor incluidas, con deshacer y diario; Save As a proyecto nuevo), `static/` (HTML/JS/CSS sin dependencias) | stdlib; numpy/scipy al calcular |
 | `nandu/powerflow.py` | Motor OpenDSS para el formato JSON nativo (validador) | `dss-python` |
 
 ## Reglas del proyecto (no negociables)
@@ -162,11 +162,22 @@ Precauciones:
 - Estado de la base: 4 reguladores ClosedDelta en FixedTap (REG-*-A, 23,8 kV LL);
   medidores `CYMNETWORKMETER` de cabecera en A/FP; cargas en kW/kvar.
 - `data/` y `.venv/` están en `.gitignore`.
-- SIN: `data/sin-geo-20261109.nandu.sqlite`, desde `../eventos_ens/esquema/sin_cyme.json`
+- SIN: `data/sin-20261110-v0160.nandu.sqlite` (barras, 3 devanados = 39 y el dibujo del unifilar en tablas `ESQ_*` para las vistas Map y Schematic), desde
+  `..\0001_GT-DAS\ens\esquema\sin_cyme.json` (en Linux, `../eventos_ens/esquema`); antes `data/sin-geo-20261109.nandu.sqlite`, desde `sin_cyme.json`
   (`exportar_cyme.py`): UTM 21 S y longitudes de línea del trazado; sin impedancias ni cargas. Base CYME de referencia
   en Linux: `/home/mb/ANDE/BD_respaldo_lc.mdb` (71 redes), legible con mdbtools en solo
   lectura; sirvió para verificar Transformer = 5. Este equipo tiene Python 3.10: las 2
   pruebas de `test_sxst_import` con `hashlib.file_digest` fallan por versión.
+- En Windows el esquema está en `..\0001_GT-DAS\ens\esquema` (copiado completo el 9 nov. 2026, no es repo
+  git). Se regenera con `py -3.11 exportar_cyme.py` en esa carpeta (networkx + PyYAML). Desde 0.16.0 el
+  exportador escribe 3 devanados = 39, `CYMBUSDISPLAY`, los conductores del PDF (`ESQ_TRAZO`, necesita
+  `extraido.json`), el recorrido de las líneas (`ESQ_TRAMO_PUNTO`) y las estaciones a 3 m por punto.
+- Códigos de transmisión (0.16.0): bases de prueba y scripts en `data/cyme-codigos-20261109/`. Para
+  crear una base de prueba en CYME: base nueva y **Database > Import > CYME XML Self-Contained
+  Files** (`cympy.db.ImportXML` desde la consola cuelga CYME). Antes de importar varios `.sxst`,
+  comprobar que no repitan IDs de sección ni de nodo. El puente del MCP solo arranca con
+  `BD_Centro0926.mdb` conectada (`project.json`). Casos IEEE 9/14/57/118 con generadores en
+  `C:\Program Files\CYME\CYME\tutorial\QATestCase`.
 
 ## Pendientes principales
 
@@ -177,9 +188,13 @@ Precauciones:
 2. Escritor Access y `.sxst` para proyectos de Access (0.15.0 exporta solo proyectos venidos de `.sxst`, sin
    resultados); abrir en CYME un `.sxst` exportado (pendiente de contraste); multiplicadores de Lagrange
    normalizados; medidores intermedios en Load Allocation; modo de taps `Infinite`.
-3. Interfaz: vista esquemática y escenarios; transformadores y GD. La edición de red (0.12.0)
+3. Interfaz: escenarios. Desde 0.16.0 tiene vista Schematic (posiciones del dibujo en `ESQ_NODO`/`ESQ_EQUIPO`) y dibuja barras (`CYMBUSDISPLAY`), conectores,
+   transformadores, generadores, reactores, SVC y STATCOM; falta arrastrar barras con conectores. La edición de red (0.12.0)
    no mueve aún puntos intermedios (`CYMINTERMEDIATEPOINT`, que desde 0.14.0 se dibujan) ni reconecta tramos.
-4. De la revisión técnica de 0.9.0 (`looping/`, respondida en 0.10.0): estimador calibrado
+4. SIN (`sin.md`): secciones sin equipo serie que CYME usa para conectar generadores, cargas y
+   STATCOM a la barra, y barras con `ConnectorIndex` ≠ 0; hoy se excluyen. Contrastar con el flujo
+   CYME de los casos IEEE. Luego transformador de dos devanados y barras PV/slack (`sin.md` §4).
+5. De la revisión técnica de 0.9.0 (`looping/`, respondida en 0.10.0): estimador calibrado
    con covarianzas propagadas y rango verificado (H6); escalamiento y búsqueda lineal en
    Newton; validación en alimentadores externos al ajuste (calibración ≠ validación);
    licencia y CI.
@@ -197,6 +212,7 @@ no reproduce CZU08 (Vmín 87,5 % frente a 83,6 % de CYME). No usarlo como valida
 entender antes ese estado de los reguladores.
 
 Interfaz: imita la disposición y los nombres de CYME (en inglés, como sus menús e
-informes). Para revisarla visualmente se usa `mcp__rea__capture_browser_scenario`
+informes). Para revisarla visualmente se usa Chrome headless por CDP (un script Node con
+`--remote-debugging-port`; `mcp__rea__capture_browser_scenario` se colgó el 9 nov. 2026)
 con Chrome (`C:\Program Files\Google\Chrome\Application\chrome.exe`). El
 servidor debe reiniciarse tras cambiar Python; los estáticos no se cachean.
