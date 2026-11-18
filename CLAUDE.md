@@ -14,13 +14,13 @@ SQLite, interpreta su semántica y calcula **flujo de carga desbalanceado** y
 por **ingeniería inversa** y se valida contra CYME real mediante el MCP hermano.
 Ñandu no importa código de CYME ni del MCP y no necesita CYME para funcionar.
 
-Versión actual: 0.16.0 (`nandu/__init__.py`, `pyproject.toml`). Ambiente: Windows,
+Versión actual: 0.17.0 (`nandu/__init__.py`, `pyproject.toml`). Ambiente: Windows,
 PowerShell, Python 3.11. Documentación, mensajes y docstrings en español.
 
 ## Comandos
 
 ```powershell
-# Pruebas completas (171; las de OpenDSS y del motor nodal se omiten sin sus paquetes)
+# Pruebas completas (183; las de OpenDSS y del motor nodal se omiten sin sus paquetes)
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 # Una prueba
 .\.venv\Scripts\python.exe -m unittest tests.test_nodal.RegulatorTests.test_closed_delta_relation_and_power_conservation -v
@@ -39,6 +39,7 @@ py -3.11 -m nandu import-cyme --database "C:\Users\moise\Documents\020_CYM_MCP\d
 py -3.11 -m nandu import-sxst --study <estudio>.sxst [--networks CZU06] --output data\nuevo.nandu.sqlite
 py -3.11 -m nandu import-tables --tables <tablas>.json --output data\nuevo.nandu.sqlite   # p. ej. el SIN (README 0.14.0)
 py -3.11 -m nandu export-sxst data\x.nandu.sqlite --output data\exports\x.sxst [--study <original>.sxst]
+py -3.11 -m nandu export-ascii data\sin-20261110-v0160.nandu.sqlite --output data\exports\sin-<fecha>-v<versión>   # CYME ASCII: _red.txt + _equipos.txt
 py -3.11 -m nandu inspect data\czu06-czu08.nandu.sqlite
 py -3.11 -m nandu topology data\czu06-czu08.nandu.sqlite
 .\.venv\Scripts\python.exe -m nandu solve examples\delta-compensated.json   # OpenDSS, validador
@@ -74,6 +75,7 @@ JSON nandu-electrical-network-v1 --powerflow (OpenDSS)--> validación independie
 | `nandu/allocation.py` | Load Allocation (kVA conectado/actual, kWh) ajustada con flujo de carga | numpy, scipy |
 | `nandu/sxst_import.py` | Estudios CYME `.sxst` (XML) → tablas tipo Access → `.nandu.sqlite` | stdlib |
 | `nandu/tables_import.py` | JSON `nandu-cyme-tables-v1` (tablas ya en códigos Access, con procedencia y convenciones) → `.nandu.sqlite`. Lo produce `eventos_ens/esquema/exportar_cyme.py` para el SIN | stdlib |
+| `nandu/ascii_export.py` | Proyecto → CYME ASCII (`<prefijo>_red.txt` + `_equipos.txt`, Database > Import > CYME ASCII Files). Columnas copiadas de exportaciones de CYME (`data/cyme-ascii-ref/`); tipo, tabla o código sin verificar hace fallar | stdlib |
 | `nandu/sxst_export.py` | Proyecto → `.sxst` por ida y vuelta: diferencias con el estudio original escritas sobre sus bytes (expat), verificadas reimportando | stdlib |
 | `nandu/analysis.py` | Informes JSON y comparación con CSV de CYME | numpy, scipy |
 | `nandu/ui/` | Interfaz tipo CYME: `server.py` (http.server, solo 127.0.0.1), `service.py` (geometría, propiedades, informes), `cyme_symbols.py` (símbolos y capa por defecto leídos de la instalación local de CYME, sin copiarlos), `editing.py` (edición de tablas CYME, lecturas de medidor incluidas, con deshacer y diario; Save As a proyecto nuevo), `static/` (HTML/JS/CSS sin dependencias) | stdlib; numpy/scipy al calcular |
@@ -172,6 +174,10 @@ Precauciones:
   git). Se regenera con `py -3.11 exportar_cyme.py` en esa carpeta (networkx + PyYAML). Desde 0.16.0 el
   exportador escribe 3 devanados = 39, `CYMBUSDISPLAY`, los conductores del PDF (`ESQ_TRAZO`, necesita
   `extraido.json`), el recorrido de las líneas (`ESQ_TRAMO_PUNTO`) y las estaciones a 3 m por punto.
+- CYME ASCII (0.17.0): referencia en `data/cyme-ascii-ref/` (exportada por CYME de `BD_Centro0926.mdb` y
+  `bd_nuevo-1.mdb`). Ojo: `NStatus` = 1 − `NormalStatus`; `Location` en letras (`M`/`S`/`L`) salvo
+  capacitores y tres devanados. SIN exportado en `data/exports/sin-20261117-v0170_*.txt`, sin importar
+  aún en CYME (pendiente: base nueva + Database > Import > CYME ASCII Files).
 - Códigos de transmisión (0.16.0): bases de prueba y scripts en `data/cyme-codigos-20261109/`. Para
   crear una base de prueba en CYME: base nueva y **Database > Import > CYME XML Self-Contained
   Files** (`cympy.db.ImportXML` desde la consola cuelga CYME). Antes de importar varios `.sxst`,

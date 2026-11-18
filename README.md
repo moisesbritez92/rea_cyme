@@ -2,7 +2,7 @@
 
 Software para modelar y analizar redes eléctricas de distribución.
 
-## Versión actual: 0.16.0
+## Versión actual: 0.17.0
 
 Reimplementación independiente de CYME 9.0 para redes de distribución. Importa
 bases Access y estudios `.sxst` de CYME a un archivo SQLite propio, conserva las
@@ -22,6 +22,8 @@ maniobras, todavía sin parámetros eléctricos. Desde 0.15.0 importa y exporta 
 desde la interfaz; el export es de ida y vuelta sobre el estudio original y solo escribe la red.
 Desde 0.16.0 reconoce los códigos Access de transformadores de tres devanados, autotransformadores,
 generadores, reactores, SVC y STATCOM, verificados en CYME (todavía sin modelo eléctrico).
+Desde 0.17.0 exporta a archivos CYME ASCII (`export-ascii`, red y equipos), con lo que el SIN
+se puede llevar a una base CYME con Database > Import > CYME ASCII Files.
 
 **Alcance demostrado y límites.** El flujo se contrastó con CYME en dos
 alimentadores (CZU06/CZU08): 2.690 tensiones, 11,2 V de diferencia máxima. Es un
@@ -1324,3 +1326,66 @@ también con un nodo compartido entre redes. El SHA-256 de las bases no cambió.
 - Las dos semánticas se pueden contrastar con el flujo de CYME sobre los casos IEEE de
   `tutorial\QATestCase`.
 - Falta además el código 22 de `BD_respaldo_lc.mdb`.
+
+## Exportación a CYME ASCII — 0.17.0
+
+`nandu export-ascii <proyecto> --output <prefijo>` escribe `<prefijo>_red.txt` (red) y
+`<prefijo>_equipos.txt` (catálogos) en el formato **CYME ASCII**, más el informe `<prefijo>.json`.
+CYME los importa con **Database > Import > CYME ASCII Files** (o `cympy.db.ImportASCII`).
+El exportador es `nandu/ascii_export.py` y no necesita CYME ni dependencias.
+
+**De dónde sale el formato.** No hay manual de importación en la instalación, y la DLL solo trae las
+palabras clave. La referencia son archivos exportados por el propio CYME 9.0 r4 (`data/cyme-ascii-ref/`,
+`BD_Centro0926.mdb` y `bd_nuevo-1.mdb`), cruzados con esas bases Access en solo lectura (SHA-256 sin
+cambios). Cada nombre de columna escrito sale de esas líneas `FORMAT_*`, y las pruebas lo comprueban con
+las líneas copiadas tal cual. Las conversiones verificadas son:
+- fases y `ClosedPhase` en texto;
+- `Location` 0/1/2 → `M`/`S`/`L`;
+- `NStatus` = 1 − `NormalStatus`;
+- `NormalFeedingNodeId` → `FromNodeID`;
+- una cabecera por fuente;
+- `NetworkType` 0/1 → `FEEDER`/`SUBSTATION`.
+
+La tabla completa, con su evidencia, está en `docs/cyme-ingenieria-inversa.md`. El informe copia las
+`CONVENTIONS` con su `authority`.
+
+**Reglas.**
+- Un tipo de equipo, tabla o código sin correspondencia verificada hace fallar la exportación con la
+  lista. Hoy se escriben líneas aéreas (2), transformadores (5), interruptores (8) y tres devanados (39).
+- Un índice de conector ≠ 0 o un valor con coma también la hace fallar.
+- `CYMBUSDISPLAY` y `CYMDBPARAMETERS` se omiten y se informan; las `ESQ_*` no van a CYME.
+- Las columnas con datos que el formato no recibe van a `dropped_columns`, y los valores vacíos por
+  campo a `empty_values`.
+- Los archivos no se reemplazan y se releen al final: deben reproducir las filas escritas.
+
+**SIN** (`data/sin-20261110-v0160.nandu.sqlite` → `data/exports/sin-20261117-v0170_*.txt`):
+- Red `SIN` como `FEEDER` con 2.008 nodos, 2.214 tramos, 225 líneas, 1.748 interruptores
+  (188 abiertos), 226 transformadores, 15 de tres devanados, 4.730 puntos intermedios y 21 fuentes
+  con su cabecera.
+- Equipos: 4 interruptores, 24 transformadores y 7 de tres devanados.
+- SHA-256 de `_red.txt`: `9bd88ec0…9855e`; de `_equipos.txt`: `2615e933…f7555`.
+- Lo que falta es lo mismo que falta en el proyecto, y queda vacío:
+  - las 21 fuentes no tienen equipo (`SourceID`) ni impedancia equivalente;
+  - `HeadNodeID` queda vacío porque hay 21 cabeceras;
+  - las 225 líneas no tienen conductor y 15 no tienen longitud;
+  - 5 transformadores no tienen kVA y los 7 de tres devanados no tienen capacidad;
+  - no hay impedancias de transformador.
+- No van al archivo el dibujo de las barras (`CYMBUSDISPLAY`), el sistema de coordenadas (EPSG:32721),
+  ni la descripción y el color de la red.
+
+**Pendiente de contraste** (importar en una base CYME nueva):
+- que CYME acepte `FORMAT_*` con solo algunas columnas;
+- `Location` de transformadores (`S`) y de tres devanados (número);
+- una red `FEEDER` con 21 cabeceras;
+- fuentes sin equipo y líneas sin conductor.
+
+Verificación: **183 pruebas correctas**, doce nuevas (`tests/test_ascii_export.py`):
+- nombres y orden de columnas frente a las líneas `FORMAT_*` de CYME;
+- red y equipos de un caso con dos fuentes, línea, interruptores abierto y cerrado, transformador y
+  tres devanados;
+- disposición del archivo (CRLF, `[GENERAL]`, `[SI]`, `FEEDER=`);
+- cabecera única y subestación;
+- no reemplazar archivos;
+- fallos por códigos, tipos, tablas, filas o terciario faltantes, conectores y comas;
+- columnas descartadas;
+- lectura de la exportación real de `bd_nuevo`.

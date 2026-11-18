@@ -213,6 +213,53 @@ implementado). Las cargas bloqueadas no se modifican y su potencia se resta de l
 demanda. Parámetros del estudio: `Method=KVAMethod`, `Tolerance=0,5`,
 `RunVoltageDrop=true`, `InitialLossesKW=0,1`.
 
+## Formato CYME ASCII (17 nov. 2026)
+
+Es el formato de **Database > Import/Export > CYME ASCII Files** (`cympy.db.ImportASCII` /
+`ExportASCII`). La ayuda (`Cyme.chm`, `cymeasciifiles.htm`) remite a un *CYME Import/Export Manual* que
+no viene con la instalación. `CymImpExp9064.dll` trae las 314 palabras `FORMAT_*` y los encabezados de
+sección, pero no la lista de columnas. Por eso la referencia son exportaciones hechas por CYME 9.0 r4 en
+`data/cyme-ascii-ref/`: red, equipos y cargas de `BD_Centro0926.mdb` (75 redes) y de `bd_nuevo-1.mdb`.
+
+Estructura del archivo:
+- UTF-8 sin BOM, CRLF, `[GENERAL]` (`DATE`, `CYME_VERSION=9.0`, `CYME_REVISION=4`, `COMMENTS`) y `[SI]`.
+- Cada sección declara sus columnas en `FORMAT_<CLAVE>=`; los valores van separados por coma, sin comillas,
+  numéricos con 6 decimales y vacío para nulo.
+- Las redes van dentro de `[SECTION]`: una línea `FEEDER=` o `SUBSTATION=` (con su `FORMAT_FEEDER` o
+  `FORMAT_SUBSTATION`) seguida de sus tramos.
+- El archivo de equipos lleva los catálogos (`[BREAKER]`, `[TRANSFORMER]`, `[THREE WINDING TRANSFORMER]`…),
+  con la columna `ID`.
+
+Cruce con Access, en solo lectura y con el SHA-256 sin cambios:
+
+| Access | ASCII | Evidencia |
+|---|---|---|
+| `CYMNETWORK.NetworkType` 0 / 1 | `FEEDER=` / `SUBSTATION=` (`HeadNodeID` vacío en la subestación) | 75 de 75 con tipo 0; `TEST-FEEDER` tipo 1 |
+| `CYMSECTION.Phase`, `ClosedPhase` | texto: 0 `NONE`, 1 `A`, 2 `B`, 3 `C`, 7 `ABC` | 36.403 tramos; 1.331 maniobras |
+| `From/ToNodeConnectorIndex` | `FromNodeIndex`, `ToNodeIndex` | 36.403 tramos (todos 0) |
+| `CYMSECTIONDEVICE.Location` (maniobras y reguladores) | 0 `M`, 1 `S`, 2 `L` | interruptores, seccionadores, reconectadores, fusibles y reguladores. Capacitores y tres devanados usan el número |
+| `NormalStatus` | `NStatus` **invertido**: 1 (cerrado) → 0, 0 → 1 | 1.312 y 18 maniobras |
+| `Status` | `ConnectionStatus` (solo se vio 0) | líneas y maniobras |
+| `NormalFeedingNodeId` | `FromNodeID` de los `*SETTING` de maniobras | 1.330 de 1.330 |
+| `CYMSOURCE.EquipmentId`, `OperatingVoltageA/B/C` | `SourceID`; tensiones en kV LN sin conversión | 74 fuentes |
+| `CYMHEADNODE` | `[HEADNODES]`; toda fuente está en una cabecera | 74 de 74 (una red tiene cabecera sin fuente) |
+| `CYMNODE.X/Y`, `UserDefinedBaseVoltage` | `CoordX/CoordY` (`CoordSet=1`), igual | 36.139 nodos |
+| `CYMOVERHEADLINE.Length`, `LineId` | `Length` (m), `LineCableID` | 16.560 líneas |
+| `CYMINTERMEDIATEPOINT.PointIndex` | `[INTERMEDIATE NODES]` `SeqNumber` | 37.258 puntos |
+| `CYMSECTIONNODE.NodeId/NodeConnectorIndex` | `TertiaryNodeID/TertiaryNodeIndex` | `TRANSFO` y `8` de `bd_nuevo` |
+| `CYMEQBREAKER.RatedVoltage/RatedCurrent` | `KVLL`/`Amps` | catálogo `DEFAULT` |
+| `CYMEQTRANSFORMER.NominalRatingKVA`, `Primary/SecondaryVoltageKVLL` | `KVA`, `KVLLprim/KVLLsec` | 6 equipos |
+| `CYMEQTHREEWINDINGTRANSFORMER.PrimaryRatedCapacity`, tensiones | mismos nombres y valores (15000 = 15000) | `DEFAULT` de `bd_nuevo` |
+
+Hipótesis, pendientes de importar en CYME:
+- que CYME acepte un `FORMAT_*` con solo algunas columnas y complete el resto con sus valores por defecto;
+- `Location` 1 → `S` en transformadores (solo se vio 2 → `L`);
+- `Location` en número para los de tres devanados (solo se vio 0);
+- una red `FEEDER` con varias cabeceras y `HeadNodeID` vacío.
+
+Sin formato verificado: `CYMBUSDISPLAY` (no aparece en las exportaciones), `CYMNODECONNECTOR` y el sistema
+de coordenadas (`CYMDBPARAMETERS`). Lo usa `nandu/ascii_export.py` (0.17.0).
+
 ## Formato .sxst
 
 XML UTF-8 con raíz `<Cyme Version="9.0" Revision="4">`. Contiene:

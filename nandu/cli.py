@@ -34,6 +34,10 @@ def main(argv=None):
     exporting.add_argument('file')
     exporting.add_argument('--output', required=True)
     exporting.add_argument('--study', help='Estudio original, si se movió (se verifica su SHA-256)')
+    ascii_out = commands.add_parser('export-ascii', help='Exportar un proyecto a archivos CYME ASCII '
+                                                         '(<prefijo>_red.txt y <prefijo>_equipos.txt)')
+    ascii_out.add_argument('file')
+    ascii_out.add_argument('--output', required=True, help='Prefijo de los archivos de salida')
     inspection = commands.add_parser('inspect', help='Consultar una importación sin CYME ni Access')
     inspection.add_argument('file')
     topology = commands.add_parser('topology', help='Analizar conectividad condicional por fase')
@@ -117,6 +121,16 @@ def main(argv=None):
                             study=args.study, search=[Path(args.file).resolve().parent / 'studies'])
             save_json(report_path, report)
             print(json.dumps({**report, 'report_file': str(report_path)}, indent=2, ensure_ascii=False))
+            return 0
+        if args.command == 'export-ascii':
+            from .ascii_export import export as export_ascii
+            report_path = Path(args.output + '.json')
+            if report_path.exists():
+                raise FileExistsError(f'El destino ya existe: {report_path}')
+            report = export_ascii(load_source(args.file)[1], args.output, source=Path(args.file).name)
+            save_json(report_path, report)
+            summary = {k: v for k, v in report.items() if k != 'conventions'}
+            print(json.dumps({**summary, 'report_file': str(report_path)}, indent=2, ensure_ascii=False))
             return 0
         if args.command == 'import-sxst':
             from .sxst_import import import_study
